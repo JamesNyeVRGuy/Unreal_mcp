@@ -13,6 +13,7 @@ import { ServerSetup } from './server-setup.js';
 import { startMetricsServer } from './services/metrics-server.js';
 import { config } from './config.js';
 import { GraphQLServer } from './graphql/server.js';
+import { UnrealCommandQueue } from './utils/unreal-command-queue.js';
 
 const require = createRequire(import.meta.url);
 const packageInfo: { name?: string; version?: string } = (() => {
@@ -77,6 +78,9 @@ export function createServer() {
   });
   bridge.setAutomationBridge(automationBridge);
 
+  // Serialize all automation requests to prevent concurrent Game Thread operations
+  const serialQueue = new UnrealCommandQueue();
+  automationBridge.setSerialQueue(serialQueue);
 
   automationBridge.on('connected', ({ metadata, port, protocol }) => {
     log.info(
@@ -145,7 +149,7 @@ export function createServer() {
   const serverSetup = new ServerSetup(server, bridge, automationBridge, log, healthMonitor);
   serverSetup.setup(); // Register tools, resources, and prompts
 
-  return { server, bridge, automationBridge, graphqlServer, metricsServer };
+  return { server, bridge, automationBridge, graphqlServer, metricsServer, serialQueue };
 }
 
 // Export configuration schema for session UI and runtime validation
@@ -171,7 +175,7 @@ export default function createServerDefault({ config }: { config?: Record<string
 }
 
 export async function startStdioServer() {
-  const { server, bridge, automationBridge, graphqlServer, metricsServer } = createServer();
+  const { server, bridge, automationBridge, graphqlServer, metricsServer, serialQueue } = createServer();
   const transport = new StdioServerTransport();
   let shuttingDown = false;
 
@@ -208,6 +212,12 @@ export async function startStdioServer() {
     shuttingDown = true;
     const reason = signal ? ` due to ${signal}` : '';
     log.info(`Shutting down MCP server${reason}`);
+    try {
+      serialQueue.stopProcessor();
+    } catch (error) {
+      log.warn('Failed to stop serial queue cleanly', error);
+    }
+
     try {
       automationBridge.stop();
     } catch (error) {

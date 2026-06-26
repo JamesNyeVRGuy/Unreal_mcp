@@ -28,6 +28,7 @@ import { HandshakeHandler } from './handshake.js';
 import { MessageHandler } from './message-handler.js';
 import { automationMessageSchema } from './message-schema.js';
 import { config } from '../config.js';
+import type { UnrealCommandQueue } from '../utils/unreal-command-queue.js';
 
 const require = createRequire(import.meta.url);
 const packageInfo: { name?: string; version?: string } = (() => {
@@ -72,6 +73,7 @@ export class AutomationBridge extends EventEmitter {
     private queuedRequestItems: QueuedRequestItem[] = [];
     private connectionPromise?: Promise<void>;
     private connectionLock = false;
+    private serialQueue?: UnrealCommandQueue;
 
     constructor(options: AutomationBridgeOptions = {}) {
         super();
@@ -314,6 +316,14 @@ export class AutomationBridge extends EventEmitter {
         listener: AutomationBridgeEvents[K]
     ): this {
         return super.off(event, listener as (...args: unknown[]) => void);
+    }
+
+    /**
+     * Set a serial execution queue. When set, all sendAutomationRequest calls
+     * are routed through this queue to prevent concurrent Game Thread operations.
+     */
+    setSerialQueue(queue: UnrealCommandQueue): void {
+        this.serialQueue = queue;
     }
 
     start(): void {
@@ -603,6 +613,21 @@ export class AutomationBridge extends EventEmitter {
     }
 
     async sendAutomationRequest<T = AutomationBridgeResponseMessage>(
+        action: string,
+        payload: Record<string, unknown> = {},
+        options: { timeoutMs?: number } = {}
+    ): Promise<T> {
+        // Route through serial queue if configured to prevent concurrent Game Thread operations
+        if (this.serialQueue) {
+            return this.serialQueue.execute(
+                () => this.sendAutomationRequestInternal<T>(action, payload, options),
+                5 // default priority
+            );
+        }
+        return this.sendAutomationRequestInternal<T>(action, payload, options);
+    }
+
+    private async sendAutomationRequestInternal<T = AutomationBridgeResponseMessage>(
         action: string,
         payload: Record<string, unknown> = {},
         options: { timeoutMs?: number } = {}

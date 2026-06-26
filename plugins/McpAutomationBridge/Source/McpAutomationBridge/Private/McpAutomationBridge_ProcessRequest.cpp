@@ -7,6 +7,15 @@
 #include "McpConnectionManager.h"
 #include "Misc/ScopeExit.h"
 #include "Misc/ScopeLock.h"
+#if WITH_EDITOR
+#if __has_include("ScopedTransaction.h")
+#include "ScopedTransaction.h"
+#elif __has_include("Editor/ScopedTransaction.h")
+#include "Editor/ScopedTransaction.h"
+#elif __has_include("Misc/ScopedTransaction.h")
+#include "Misc/ScopedTransaction.h"
+#endif
+#endif
 
 void UMcpAutomationBridgeSubsystem::ProcessAutomationRequest(
     const FString &RequestId, const FString &Action,
@@ -110,6 +119,12 @@ void UMcpAutomationBridgeSubsystem::ProcessAutomationRequest(
   const double DispatchStartSeconds = FPlatformTime::Seconds();
 
   auto HandleAndLog = [&](const TCHAR *HandlerLabel, auto &&Callable) -> bool {
+#if WITH_EDITOR
+    // Wrap handler in an undo transaction so MCP operations appear in
+    // Edit > Undo. FScopedTransaction is a no-op if nothing is modified.
+    const FString TransactionDesc = FString::Printf(TEXT("MCP: %s"), *Action);
+    const FScopedTransaction Transaction(FText::FromString(TransactionDesc));
+#endif
     const bool bResult = Callable();
     if (bResult) {
       bDispatchHandled = true;

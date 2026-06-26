@@ -275,18 +275,14 @@ static inline FString SanitizeProjectRelativePath(const FString &InPath) {
   // Reject paths that start with / but don't have a valid root
   // This catches paths like /etc/passwd or /invalid/path
   if (!bValidRoot) {
-    // Check if it looks like a plugin path (e.g., /MyPlugin/Content/Asset)
-    // Plugin paths must have at least 3 segments: /PluginName/Content/...
-    TArray<FString> Segments;
-    CleanPath.ParseIntoArray(Segments, TEXT("/"), true);
-    const bool bLooksLikePluginPath = Segments.Num() >= 3 &&
-        Segments.Num() >= 2 && Segments[1].Equals(TEXT("Content"), ESearchCase::IgnoreCase);
-    
-    if (!bLooksLikePluginPath) {
+    // Use UE's mount point registry to check if this is a valid content root
+    // (e.g., plugin paths like /Canopy/Tests/MyLevel are mounted by the engine)
+    FText ValidationReason;
+    if (!FPackageName::IsValidLongPackageName(CleanPath, true, &ValidationReason)) {
       UE_LOG(
           LogMcpAutomationBridgeSubsystem, Warning,
-          TEXT("SanitizeProjectRelativePath: Rejected path without valid root (not /Game, /Engine, /Script, or valid plugin path): %s"),
-          *InPath);
+          TEXT("SanitizeProjectRelativePath: Rejected path '%s': %s"),
+          *InPath, *ValidationReason.ToString());
       return FString();
     }
   }
@@ -466,11 +462,18 @@ static inline bool ValidateAssetCreationPath(
     return false;
   }
   
-  // Ensure folder starts with valid root
-  if (!SanitizedFolder.StartsWith(TEXT("/Game")) && 
+  // Ensure folder starts with valid root.
+  // Check well-known roots first, then fall back to engine mount point validation
+  // to support plugin content roots (e.g. /Canopy/, /MyPlugin/).
+  if (!SanitizedFolder.StartsWith(TEXT("/Game")) &&
       !SanitizedFolder.StartsWith(TEXT("/Engine")) &&
       !SanitizedFolder.StartsWith(TEXT("/Script"))) {
-    SanitizedFolder = TEXT("/Game") + SanitizedFolder;
+    // Check if this is a valid mounted content root (plugin mount points)
+    FText MountValidationReason;
+    if (!FPackageName::IsValidLongPackageName(SanitizedFolder / TEXT("DummyAsset"), false, &MountValidationReason)) {
+      // Not a recognized mount point, default to /Game
+      SanitizedFolder = TEXT("/Game") + SanitizedFolder;
+    }
   }
   
   // Sanitize asset name
@@ -490,6 +493,19 @@ static inline bool ValidateAssetCreationPath(
   }
   
   return true;
+}
+
+// Helper to create a new package with path validation
+// Returns nullptr and sets OutError if path is invalid
+static inline UPackage* CreateValidatedAssetPackage(const FString& Path, const FString& Name, FString& OutError) {
+  FString PackageName;
+  FString SanitizedName = SanitizeAssetName(Name);
+
+  if (!ValidateAssetCreationPath(Path, SanitizedName, PackageName, OutError)) {
+    return nullptr;
+  }
+
+  return CreatePackage(*PackageName);
 }
 
 // Normalize an asset path to ensure it's in valid long package name format.
@@ -888,15 +904,18 @@ static inline bool McpSafeLevelSave(ULevel* Level, const FString& FullPath, int3
     }
 
     FString PackagePath = FullPath;
-    if (!PackagePath.StartsWith(TEXT("/Game/")))
+    if (!PackagePath.StartsWith(TEXT("/")))
     {
-        if (!PackagePath.StartsWith(TEXT("/")))
+        PackagePath = TEXT("/Game/") + PackagePath;
+    }
+    else if (!PackagePath.StartsWith(TEXT("/Game/")))
+    {
+        // Allow any valid mounted content root (plugin paths like /Canopy/Maps/...)
+        FText ValidationReason;
+        if (!FPackageName::IsValidLongPackageName(PackagePath, true, &ValidationReason))
         {
-            PackagePath = TEXT("/Game/") + PackagePath;
-        }
-        else
-        {
-            UE_LOG(LogTemp, Error, TEXT("McpSafeLevelSave: Invalid path (not under /Game/): %s"), *PackagePath);
+            UE_LOG(LogTemp, Error, TEXT("McpSafeLevelSave: Invalid path '%s': %s"),
+                *PackagePath, *ValidationReason.ToString());
             return false;
         }
     }
@@ -1559,6 +1578,13 @@ ExportPropertyToJsonValue(void *TargetContainer, FProperty *Property) {
         NP->GetPropertyValue_InContainer(TargetContainer).ToString());
   }
 
+  // Text: emit a string for round-trip with the simple set_property form.
+  // Localized variants are still settable via the object form on the way back in.
+  if (FTextProperty *TP = CastField<FTextProperty>(Property)) {
+    const FText &Value = TP->GetPropertyValue_InContainer(TargetContainer);
+    return MakeShared<FJsonValueString>(Value.ToString());
+  }
+
   // Booleans
   if (FBoolProperty *BP = CastField<FBoolProperty>(Property)) {
     return MakeShared<FJsonValueBoolean>(
@@ -1879,6 +1905,12 @@ SaveLoadedAssetThrottled(UObject *Asset, double ThrottleSecondsOverride = -1.0,
     }
   }
 
+  // Mark the package dirty so SaveLoadedAsset will actually write it
+  if (UPackage* Pkg = Asset->GetPackage())
+  {
+    Pkg->MarkPackageDirty();
+  }
+
   // Perform the save and record timestamp on success
   const bool bSaved = UEditorAssetLibrary::SaveLoadedAsset(Asset);
   if (bSaved) {
@@ -1988,6 +2020,48 @@ ApplyJsonValueToProperty(void *TargetContainer, FProperty *Property,
       return true;
     }
     OutError = TEXT("Expected string for name property");
+    return false;
+  }
+
+  // Text: accept either a plain string (FText::FromString) or a JSON object
+  //   { "SourceString": "...", "Namespace": "...", "Key": "..." }
+  // for properly-keyed localizable text. Namespace and Key are both optional;
+  // when either is provided, the result is wrapped via FText::ChangeKey so the
+  // localization tools pick it up.
+  if (FTextProperty *TP = CastField<FTextProperty>(Property)) {
+    if (ValueField->Type == EJson::String) {
+      TP->SetPropertyValue_InContainer(
+          TargetContainer, FText::FromString(ValueField->AsString()));
+      return true;
+    }
+    if (ValueField->Type == EJson::Object) {
+      const TSharedPtr<FJsonObject> &Obj = ValueField->AsObject();
+      if (!Obj.IsValid()) {
+        OutError = TEXT("Expected non-null object for text property");
+        return false;
+      }
+      FString SourceString;
+      if (!Obj->TryGetStringField(TEXT("SourceString"), SourceString)) {
+        Obj->TryGetStringField(TEXT("Value"), SourceString);
+      }
+      FString Namespace;
+      FString Key;
+      Obj->TryGetStringField(TEXT("Namespace"), Namespace);
+      Obj->TryGetStringField(TEXT("Key"), Key);
+      if (SourceString.IsEmpty() && Namespace.IsEmpty() && Key.IsEmpty()) {
+        OutError = TEXT(
+            "Text object must include SourceString (Namespace/Key optional)");
+        return false;
+      }
+      FText NewText = FText::FromString(SourceString);
+      if (!Namespace.IsEmpty() || !Key.IsEmpty()) {
+        NewText = FText::ChangeKey(FTextKey(Namespace), FTextKey(Key), NewText);
+      }
+      TP->SetPropertyValue_InContainer(TargetContainer, NewText);
+      return true;
+    }
+    OutError = TEXT(
+        "Expected string or {SourceString, Namespace, Key} object for text property");
     return false;
   }
 
@@ -2134,6 +2208,54 @@ ApplyJsonValueToProperty(void *TargetContainer, FProperty *Property,
     }
     OutError = TEXT("Enum property has no valid enum definition");
     return false;
+  }
+
+  // Class reference (TSubclassOf<T> / UClass*). Must be checked BEFORE the
+  // generic FObjectProperty branch, because FClassProperty derives from it and
+  // the generic branch would LoadObject<UObject> -- which for a Blueprint path
+  // returns the asset (UBlueprint), not its generated UClass, leaving the
+  // TSubclassOf null. Here we resolve to the actual class, accepting paths with
+  // or without the "_C" suffix.
+  if (FClassProperty *CP = CastField<FClassProperty>(Property)) {
+    if (ValueField->Type != EJson::String) {
+      OutError = TEXT("Expected string class path for class property");
+      return false;
+    }
+    const FString Path = ValueField->AsString();
+    if (Path.IsEmpty()) {
+      CP->SetObjectPropertyValue_InContainer(TargetContainer, nullptr);
+      return true;
+    }
+    // 1. Direct load -- handles native /Script classes and explicit object paths
+    //    that already carry a ".ClassName_C" suffix.
+    UClass *Loaded = LoadObject<UClass>(nullptr, *Path);
+    // 2. Bare asset package path (e.g. "/Game/UI/WBP_Foo"). The Blueprint-generated
+    //    class lives at "<Package>.<AssetName>_C", NOT "<Package>_C". Construct it.
+    if (!Loaded) {
+      FString PackagePath = Path;
+      int32 DotIdx = INDEX_NONE;
+      if (PackagePath.FindChar(TEXT('.'), DotIdx)) {
+        PackagePath = PackagePath.Left(DotIdx);
+      }
+      FString AssetName = PackagePath;
+      int32 SlashIdx = INDEX_NONE;
+      if (PackagePath.FindLastChar(TEXT('/'), SlashIdx)) {
+        AssetName = PackagePath.Mid(SlashIdx + 1);
+      }
+      const FString GenClassPath = FString::Printf(TEXT("%s.%s_C"), *PackagePath, *AssetName);
+      Loaded = LoadObject<UClass>(nullptr, *GenClassPath);
+    }
+    if (!Loaded) {
+      OutError = FString::Printf(TEXT("Class not found at path: %s (also tried generated-class form <Package>.<Asset>_C)"), *Path);
+      return false;
+    }
+    if (CP->MetaClass && !Loaded->IsChildOf(CP->MetaClass)) {
+      OutError = FString::Printf(TEXT("Class %s is not a subclass of %s"),
+                                 *Loaded->GetName(), *CP->MetaClass->GetName());
+      return false;
+    }
+    CP->SetObjectPropertyValue_InContainer(TargetContainer, Loaded);
+    return true;
   }
 
   // Object reference
@@ -2307,6 +2429,36 @@ ApplyJsonValueToProperty(void *TargetContainer, FProperty *Property,
                    : FName(*FString::Printf(TEXT("%g"), V->AsNumber()));
         continue;
       }
+      if (FTextProperty *TIP = CastField<FTextProperty>(Inner)) {
+        FText &Dest = *reinterpret_cast<FText *>(ElemPtr);
+        if (V->Type == EJson::String) {
+          Dest = FText::FromString(V->AsString());
+          continue;
+        }
+        if (V->Type == EJson::Object) {
+          const TSharedPtr<FJsonObject> &Obj = V->AsObject();
+          if (Obj.IsValid()) {
+            FString SourceString;
+            if (!Obj->TryGetStringField(TEXT("SourceString"), SourceString)) {
+              Obj->TryGetStringField(TEXT("Value"), SourceString);
+            }
+            FString Namespace;
+            FString Key;
+            Obj->TryGetStringField(TEXT("Namespace"), Namespace);
+            Obj->TryGetStringField(TEXT("Key"), Key);
+            FText NewText = FText::FromString(SourceString);
+            if (!Namespace.IsEmpty() || !Key.IsEmpty()) {
+              NewText = FText::ChangeKey(FTextKey(Namespace), FTextKey(Key), NewText);
+            }
+            Dest = NewText;
+            continue;
+          }
+        }
+        OutError = FString::Printf(
+            TEXT("Array element %d: expected string or {SourceString,Namespace,Key} for text"),
+            i);
+        return false;
+      }
       if (FBoolProperty *BIP = CastField<FBoolProperty>(Inner)) {
         uint8 &Dest = *reinterpret_cast<uint8 *>(ElemPtr);
         Dest = (V->Type == EJson::Boolean) ? (V->AsBool() ? 1 : 0)
@@ -2344,6 +2496,66 @@ ApplyJsonValueToProperty(void *TargetContainer, FProperty *Property,
                    ? (uint8)V->AsNumber()
                    : (uint8)FCString::Atoi(*V->AsString());
         continue;
+      }
+
+      // Object reference inner type (e.g., TArray<TObjectPtr<UMyAsset>>)
+      if (FObjectProperty *OIP = CastField<FObjectProperty>(Inner)) {
+        if (V->Type == EJson::String) {
+          const FString Path = V->AsString();
+          UObject *Loaded = nullptr;
+          if (!Path.IsEmpty()) {
+            Loaded = LoadObject<UObject>(nullptr, *Path);
+            if (!Loaded) {
+              Loaded = StaticLoadObject(UObject::StaticClass(), nullptr, *Path);
+            }
+          }
+          OIP->SetObjectPropertyValue(ElemPtr, Loaded);
+          continue;
+        }
+        OutError = FString::Printf(
+            TEXT("Array element %d: expected string path for object reference"),
+            i);
+        return false;
+      }
+
+      // Struct inner type (e.g., TArray<FMyStruct>)
+      if (FStructProperty *SIP = CastField<FStructProperty>(Inner)) {
+        if (V->Type == EJson::String && SIP->Struct) {
+          const FString Txt = V->AsString();
+          // Try JSON parse first
+          TSharedRef<TJsonReader<>> ElemReader =
+              TJsonReaderFactory<>::Create(Txt);
+          TSharedPtr<FJsonObject> ElemObj;
+          if (FJsonSerializer::Deserialize(ElemReader, ElemObj) &&
+              ElemObj.IsValid()) {
+            if (FJsonObjectConverter::JsonObjectToUStruct(
+                    ElemObj.ToSharedRef(), SIP->Struct, ElemPtr, 0, 0)) {
+              continue;
+            }
+          }
+          // Fallback: UE text import format (parenthesized key=value)
+          const TCHAR *ImportBuf = *Txt;
+          SIP->Struct->ImportText(ImportBuf, ElemPtr, nullptr, PPF_None,
+                                  GLog, SIP->Struct->GetName());
+          continue;
+        }
+        if (V->Type == EJson::Object && SIP->Struct) {
+          const TSharedPtr<FJsonObject> &ElemObj = V->AsObject();
+          if (ElemObj.IsValid()) {
+            if (FJsonObjectConverter::JsonObjectToUStruct(
+                    ElemObj.ToSharedRef(), SIP->Struct, ElemPtr, 0, 0)) {
+              continue;
+            }
+          }
+          OutError = FString::Printf(
+              TEXT("Array element %d: failed to convert JSON object to struct"),
+              i);
+          return false;
+        }
+        OutError = FString::Printf(
+            TEXT("Array element %d: expected string or object for struct type"),
+            i);
+        return false;
       }
 
       // Unsupported inner type -> fail explicitly

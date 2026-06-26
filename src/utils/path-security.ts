@@ -22,15 +22,26 @@ export function sanitizePath(path: string, allowedRoots: string[] = ['/Game', '/
     }
 
     // Ensure path starts with a valid root
-    // We check case-insensitive for the root prefix to be user-friendly, 
-    // but Unreal paths are typically case-insensitive anyway.
+    // Check explicit allowedRoots first
     const isAllowed = allowedRoots.some(root =>
         normalized.toLowerCase() === root.toLowerCase() ||
         normalized.toLowerCase().startsWith(`${root.toLowerCase()}/`)
     );
 
-    if (!isAllowed) {
-        throw new Error(`Invalid path: must start with one of [${allowedRoots.join(', ')}]`);
+    // Also allow plugin mount points: paths like /PluginName or /PluginName/...
+    // where the first segment is a valid identifier (not a system path like
+    // /etc/). Plugin content is mounted at /<PluginName>/ in Unreal Engine, and
+    // the bare mount root must be reachable so callers can list its contents.
+    let isPluginPath = false;
+    if (!isAllowed && normalized.startsWith('/')) {
+        const segments = normalized.split('/').filter(Boolean);
+        if (segments.length >= 1 && /^[A-Za-z_][A-Za-z0-9_]*$/.test(segments[0])) {
+            isPluginPath = true;
+        }
+    }
+
+    if (!isAllowed && !isPluginPath) {
+        throw new Error(`Invalid path: must start with one of [${allowedRoots.join(', ')}] or a valid plugin mount point`);
     }
 
     // Basic character validation (Unreal strictness)

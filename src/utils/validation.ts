@@ -138,8 +138,11 @@ export function sanitizePath(path: string): string {
     path = path.replace(/\/\//g, '/');
   }
 
+  // Track whether the input was an absolute content path (started with /)
+  const wasAbsolute = path.startsWith('/');
+
   // Ensure path starts with /
-  if (!path.startsWith('/')) {
+  if (!wasAbsolute) {
     path = `/${path}`;
   }
 
@@ -156,14 +159,17 @@ export function sanitizePath(path: string): string {
   }
 
   // Ensure the first segment is a valid root (Game, Engine, Script, Temp)
+  // Plugin content roots (e.g. /Canopy/..., /MyPlugin/...) are allowed only
+  // if the original path was absolute — relative paths always default to /Game/
   const ROOTS = new Set(['Game', 'Engine', 'Script', 'Temp']);
-  if (!ROOTS.has(segments[0])) {
+  const looksLikePluginRoot = wasAbsolute && /^[A-Za-z_][A-Za-z0-9_]*$/.test(segments[0]);
+  if (!ROOTS.has(segments[0]) && !looksLikePluginRoot) {
     segments = ['Game', ...segments];
   }
 
   const sanitizedSegments = segments.map(segment => {
-    // Don't sanitize Game, Engine, or other root folders
-    if (['Game', 'Engine', 'Script', 'Temp'].includes(segment)) {
+    // Don't sanitize known root folders or the plugin root segment
+    if (ROOTS.has(segment) || segment === segments[0]) {
       return segment;
     }
     return sanitizeAssetName(segment);

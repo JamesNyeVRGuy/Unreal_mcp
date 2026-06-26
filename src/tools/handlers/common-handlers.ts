@@ -40,10 +40,32 @@ export function validateSecurityPatterns(args: Record<string, unknown>): string 
       if (key.toLowerCase().includes('path') && value.startsWith('/')) {
         const allowedPrefixes = ['/Game/', '/Engine/', '/Script/', '/Temp/'];
         const exactAllowed = ['/Game', '/Engine', '/Script', '/Temp'];
-        const isAllowed = allowedPrefixes.some(prefix => value.startsWith(prefix)) ||
+
+        // Allow plugin content paths (/<PluginName>/...) via MCP_ALLOWED_CONTENT_ROOTS env var
+        // Format: comma-separated plugin names, e.g. "Canopy,ChromaSense"
+        const extraRoots = process.env.MCP_ALLOWED_CONTENT_ROOTS;
+        if (extraRoots) {
+          for (const root of extraRoots.split(',').map(r => r.trim()).filter(Boolean)) {
+            allowedPrefixes.push(`/${root}/`);
+            exactAllowed.push(`/${root}`);
+          }
+        }
+
+        let isAllowed = allowedPrefixes.some(prefix => value.startsWith(prefix)) ||
                           exactAllowed.includes(value);
+
+        // Allow UE plugin content paths (e.g. /Canopy/Tests/MyLevel, /MyPlugin/Assets/Foo).
+        // The C++ SanitizeProjectRelativePath provides the authoritative gate via
+        // FPackageName::IsValidLongPackageName which checks actual mounted roots.
         if (!isAllowed) {
-          return `Security violation: '${key}' uses unauthorized absolute path. Only /Game/, /Engine/, /Script/, and /Temp/ paths are allowed.`;
+          const pluginPathPattern = /^\/[A-Za-z_][A-Za-z0-9_]*\//;
+          isAllowed = pluginPathPattern.test(value);
+        }
+
+        if (!isAllowed) {
+          return `Security violation: '${key}' uses unauthorized absolute path. ` +
+            'Only /Game/, /Engine/, /Script/, /Temp/, and plugin paths (/<PluginName>/...) are allowed. ' +
+            'You can also set MCP_ALLOWED_CONTENT_ROOTS to explicitly allow additional roots.';
         }
       }
     }

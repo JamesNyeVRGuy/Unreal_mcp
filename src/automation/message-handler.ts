@@ -205,6 +205,7 @@ export class MessageHandler {
                     'build_environment',
                     'system_control',
                     'manage_ui',
+                    'manage_logs',
                     'inspect'
                 ]);
 
