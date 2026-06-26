@@ -24,6 +24,15 @@ function getTimeoutMs(): number {
   return Number.isFinite(envDefault) && envDefault > 0 ? envDefault : 120000;
 }
 
+// Check that a widget can be identified by name (slotName/name/widgetName) or widgetIndex
+function requireWidgetIdentifier(argsRecord: Record<string, unknown>): void {
+  const hasName = !!(argsRecord.slotName || argsRecord.name || argsRecord.widgetName);
+  const hasIndex = typeof argsRecord.widgetIndex === 'number' && argsRecord.widgetIndex >= 0;
+  if (!hasName && !hasIndex) {
+    throw new Error('Missing required parameter: slotName, name, or widgetIndex');
+  }
+}
+
 /**
  * Handles all widget authoring actions for the manage_widget_authoring tool.
  */
@@ -242,7 +251,7 @@ export async function handleWidgetAuthoringTools(
 
     case 'set_anchor': {
       requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
-      requireNonEmptyString(argsRecord.slotName, 'slotName', 'Missing required parameter: slotName');
+      requireWidgetIdentifier(argsRecord);
       // Sets anchor for a widget in canvas slot
       // Accepts: anchorMin (x, y), anchorMax (x, y), alignment (x, y)
       return sendRequest('set_anchor');
@@ -250,7 +259,7 @@ export async function handleWidgetAuthoringTools(
 
     case 'set_alignment': {
       requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
-      requireNonEmptyString(argsRecord.slotName, 'slotName', 'Missing required parameter: slotName');
+      requireWidgetIdentifier(argsRecord);
       // Sets alignment for a widget
       // Accepts: alignmentX, alignmentY (0-1 values)
       return sendRequest('set_alignment');
@@ -258,7 +267,7 @@ export async function handleWidgetAuthoringTools(
 
     case 'set_position': {
       requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
-      requireNonEmptyString(argsRecord.slotName, 'slotName', 'Missing required parameter: slotName');
+      requireWidgetIdentifier(argsRecord);
       // Sets position for a widget in canvas slot
       // Accepts: positionX, positionY
       return sendRequest('set_position');
@@ -266,7 +275,7 @@ export async function handleWidgetAuthoringTools(
 
     case 'set_size': {
       requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
-      requireNonEmptyString(argsRecord.slotName, 'slotName', 'Missing required parameter: slotName');
+      requireWidgetIdentifier(argsRecord);
       // Sets size for a widget
       // Accepts: sizeX, sizeY, sizeToContent
       return sendRequest('set_size');
@@ -274,7 +283,7 @@ export async function handleWidgetAuthoringTools(
 
     case 'set_padding': {
       requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
-      requireNonEmptyString(argsRecord.slotName, 'slotName', 'Missing required parameter: slotName');
+      requireWidgetIdentifier(argsRecord);
       // Sets padding for a widget slot
       // Accepts: left, top, right, bottom (or uniform padding)
       return sendRequest('set_padding');
@@ -282,15 +291,23 @@ export async function handleWidgetAuthoringTools(
 
     case 'set_z_order': {
       requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
-      requireNonEmptyString(argsRecord.slotName, 'slotName', 'Missing required parameter: slotName');
+      requireWidgetIdentifier(argsRecord);
       // Sets z-order for canvas panel slot
       // Accepts: zOrder
       return sendRequest('set_z_order');
     }
 
+    case 'set_slot': {
+      requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
+      requireWidgetIdentifier(argsRecord);
+      // Sets non-Canvas slot properties (HBox/VBox/Overlay)
+      // Accepts: sizeRule (Auto/Fill), fillWeight, horizontalAlignment, verticalAlignment, padding, left/top/right/bottom
+      return sendRequest('set_slot');
+    }
+
     case 'set_render_transform': {
       requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
-      requireNonEmptyString(argsRecord.slotName, 'slotName', 'Missing required parameter: slotName');
+      requireWidgetIdentifier(argsRecord);
       // Sets render transform for a widget
       // Accepts: translation, scale, shear, angle, pivot
       return sendRequest('set_render_transform');
@@ -298,7 +315,7 @@ export async function handleWidgetAuthoringTools(
 
     case 'set_visibility': {
       requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
-      requireNonEmptyString(argsRecord.slotName, 'slotName', 'Missing required parameter: slotName');
+      requireWidgetIdentifier(argsRecord);
       // Sets visibility for a widget
       // Accepts: visibility (Visible, Collapsed, Hidden, HitTestInvisible, SelfHitTestInvisible)
       return sendRequest('set_visibility');
@@ -306,7 +323,7 @@ export async function handleWidgetAuthoringTools(
 
     case 'set_style': {
       requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
-      requireNonEmptyString(argsRecord.slotName, 'slotName', 'Missing required parameter: slotName');
+      requireWidgetIdentifier(argsRecord);
       // Sets style properties for a widget
       // Accepts: color, opacity, font, fontSize, brush, backgroundImage
       return sendRequest('set_style');
@@ -314,7 +331,7 @@ export async function handleWidgetAuthoringTools(
 
     case 'set_clipping': {
       requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
-      requireNonEmptyString(argsRecord.slotName, 'slotName', 'Missing required parameter: slotName');
+      requireWidgetIdentifier(argsRecord);
       // Sets clipping mode for a widget
       // Accepts: clipping (Inherit, ClipToBounds, ClipToBoundsWithoutIntersecting, ClipToBoundsAlways, OnDemand)
       return sendRequest('set_clipping');
@@ -326,7 +343,7 @@ export async function handleWidgetAuthoringTools(
 
     case 'create_property_binding': {
       requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
-      requireNonEmptyString(argsRecord.slotName, 'slotName', 'Missing required parameter: slotName');
+      requireWidgetIdentifier(argsRecord);
       requireNonEmptyString(argsRecord.propertyName, 'propertyName', 'Missing required parameter: propertyName');
       // Creates a property binding function for the widget
       // Optional: bindingType (function, variable)
@@ -335,7 +352,7 @@ export async function handleWidgetAuthoringTools(
 
     case 'bind_text': {
       requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
-      requireNonEmptyString(argsRecord.slotName, 'slotName', 'Missing required parameter: slotName');
+      requireWidgetIdentifier(argsRecord);
       // Binds text property to a variable or function
       // Accepts: bindingSource (variable name or function name)
       return sendRequest('bind_text');
@@ -343,7 +360,7 @@ export async function handleWidgetAuthoringTools(
 
     case 'bind_visibility': {
       requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
-      requireNonEmptyString(argsRecord.slotName, 'slotName', 'Missing required parameter: slotName');
+      requireWidgetIdentifier(argsRecord);
       // Binds visibility to a variable or function
       // Accepts: bindingSource
       return sendRequest('bind_visibility');
@@ -351,7 +368,7 @@ export async function handleWidgetAuthoringTools(
 
     case 'bind_color': {
       requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
-      requireNonEmptyString(argsRecord.slotName, 'slotName', 'Missing required parameter: slotName');
+      requireWidgetIdentifier(argsRecord);
       // Binds color and opacity to a variable or function
       // Accepts: bindingSource
       return sendRequest('bind_color');
@@ -359,7 +376,7 @@ export async function handleWidgetAuthoringTools(
 
     case 'bind_enabled': {
       requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
-      requireNonEmptyString(argsRecord.slotName, 'slotName', 'Missing required parameter: slotName');
+      requireWidgetIdentifier(argsRecord);
       // Binds enabled state to a variable or function
       // Accepts: bindingSource
       return sendRequest('bind_enabled');
@@ -367,7 +384,7 @@ export async function handleWidgetAuthoringTools(
 
     case 'bind_on_clicked': {
       requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
-      requireNonEmptyString(argsRecord.slotName, 'slotName', 'Missing required parameter: slotName');
+      requireWidgetIdentifier(argsRecord);
       // Binds OnClicked event to a function
       // Accepts: functionName
       return sendRequest('bind_on_clicked');
@@ -375,7 +392,7 @@ export async function handleWidgetAuthoringTools(
 
     case 'bind_on_hovered': {
       requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
-      requireNonEmptyString(argsRecord.slotName, 'slotName', 'Missing required parameter: slotName');
+      requireWidgetIdentifier(argsRecord);
       // Binds OnHovered/OnUnhovered events to functions
       // Accepts: onHoveredFunction, onUnhoveredFunction
       return sendRequest('bind_on_hovered');
@@ -383,7 +400,7 @@ export async function handleWidgetAuthoringTools(
 
     case 'bind_on_value_changed': {
       requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
-      requireNonEmptyString(argsRecord.slotName, 'slotName', 'Missing required parameter: slotName');
+      requireWidgetIdentifier(argsRecord);
       // Binds OnValueChanged event (for sliders, checkboxes, etc.)
       // Accepts: functionName
       return sendRequest('bind_on_value_changed');
@@ -404,7 +421,7 @@ export async function handleWidgetAuthoringTools(
     case 'add_animation_track': {
       requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
       requireNonEmptyString(argsRecord.animationName, 'animationName', 'Missing required parameter: animationName');
-      requireNonEmptyString(argsRecord.slotName, 'slotName', 'Missing required parameter: slotName');
+      requireWidgetIdentifier(argsRecord);
       requireNonEmptyString(argsRecord.trackType, 'trackType', 'Missing required parameter: trackType');
       // Adds an animation track to widget animation
       // trackType: transform, color, opacity, renderOpacity, material
@@ -414,7 +431,7 @@ export async function handleWidgetAuthoringTools(
     case 'add_animation_keyframe': {
       requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
       requireNonEmptyString(argsRecord.animationName, 'animationName', 'Missing required parameter: animationName');
-      requireNonEmptyString(argsRecord.slotName, 'slotName', 'Missing required parameter: slotName');
+      requireWidgetIdentifier(argsRecord);
       // Adds a keyframe to an animation track
       // Accepts: time, value (type depends on track), interpolation (linear, cubic, constant)
       return sendRequest('add_animation_keyframe');
@@ -560,6 +577,182 @@ export async function handleWidgetAuthoringTools(
       // Opens widget in preview/designer mode
       // Optional: previewSize (1080p, 720p, mobile, custom), customWidth, customHeight
       return sendRequest('preview_widget');
+    }
+
+    // =========================================================================
+    // 19.9 Widget Management (4 actions)
+    // =========================================================================
+
+    case 'remove_widget': {
+      requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
+      requireWidgetIdentifier(argsRecord);
+      return sendRequest('remove_widget');
+    }
+
+    case 'rename_widget': {
+      requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
+      requireWidgetIdentifier(argsRecord);
+      requireNonEmptyString(argsRecord.newName, 'newName', 'Missing required parameter: newName');
+      return sendRequest('rename_widget');
+    }
+
+    case 'reparent_widget': {
+      requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
+      requireWidgetIdentifier(argsRecord);
+      requireNonEmptyString(argsRecord.newParent ?? argsRecord.parentSlot, 'newParent', 'Missing required parameter: newParent or parentSlot');
+      return sendRequest('reparent_widget');
+    }
+
+    case 'get_widget_slot_info': {
+      requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
+      requireWidgetIdentifier(argsRecord);
+      return sendRequest('get_widget_slot_info');
+    }
+
+    // =========================================================================
+    // 19.10 Additional Layout Widgets (3 actions)
+    // =========================================================================
+
+    case 'add_safe_zone': {
+      requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
+      return sendRequest('add_safe_zone');
+    }
+
+    case 'add_spacer': {
+      requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
+      return sendRequest('add_spacer');
+    }
+
+    case 'add_widget_switcher': {
+      requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
+      return sendRequest('add_widget_switcher');
+    }
+
+    // =========================================================================
+    // 19.11 Styling & Fonts (4 actions)
+    // =========================================================================
+
+    case 'set_font': {
+      requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
+      requireWidgetIdentifier(argsRecord);
+      return sendRequest('set_font');
+    }
+
+    case 'set_margin': {
+      requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
+      requireWidgetIdentifier(argsRecord);
+      return sendRequest('set_margin');
+    }
+
+    case 'create_widget_style': {
+      requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
+      requireNonEmptyString(argsRecord.styleName ?? argsRecord.name, 'styleName', 'Missing required parameter: styleName or name');
+      return sendRequest('create_widget_style');
+    }
+
+    case 'apply_style_to_widget': {
+      requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
+      requireWidgetIdentifier(argsRecord);
+      return sendRequest('apply_style_to_widget');
+    }
+
+    // =========================================================================
+    // 19.12 Widget Bindings (1 action)
+    // =========================================================================
+
+    case 'set_widget_binding': {
+      requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
+      requireWidgetIdentifier(argsRecord);
+      return sendRequest('set_widget_binding');
+    }
+
+    // =========================================================================
+    // 19.13 Animation Management (3 actions)
+    // =========================================================================
+
+    case 'get_animation_info': {
+      requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
+      requireNonEmptyString(argsRecord.animationName, 'animationName', 'Missing required parameter: animationName');
+      return sendRequest('get_animation_info');
+    }
+
+    case 'set_animation_speed': {
+      requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
+      requireNonEmptyString(argsRecord.animationName, 'animationName', 'Missing required parameter: animationName');
+      return sendRequest('set_animation_speed');
+    }
+
+    case 'delete_animation': {
+      requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
+      requireNonEmptyString(argsRecord.animationName, 'animationName', 'Missing required parameter: animationName');
+      return sendRequest('delete_animation');
+    }
+
+    // =========================================================================
+    // 19.14 Localization (2 actions)
+    // =========================================================================
+
+    case 'set_localization_key': {
+      requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
+      requireWidgetIdentifier(argsRecord);
+      return sendRequest('set_localization_key');
+    }
+
+    case 'bind_localized_text': {
+      requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
+      requireWidgetIdentifier(argsRecord);
+      return sendRequest('bind_localized_text');
+    }
+
+    // =========================================================================
+    // 19.15 Additional Templates (3 actions)
+    // =========================================================================
+
+    case 'create_credits_screen': {
+      requireNonEmptyString(argsRecord.name, 'name', 'Missing required parameter: name');
+      return sendRequest('create_credits_screen');
+    }
+
+    case 'create_shop_ui': {
+      requireNonEmptyString(argsRecord.name, 'name', 'Missing required parameter: name');
+      return sendRequest('create_shop_ui');
+    }
+
+    case 'add_quest_tracker': {
+      requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
+      return sendRequest('add_quest_tracker');
+    }
+
+    // =========================================================================
+    // 19.16 Widget Component (1 action)
+    // =========================================================================
+
+    case 'add_widget_component': {
+      requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
+      return sendRequest('add_widget_component');
+    }
+
+    // =========================================================================
+    // 19.17 Widget Screenshot (1 action)
+    // =========================================================================
+
+    case 'screenshot_widget': {
+      requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
+      // Renders widget blueprint to PNG image for visual verification
+      // Optional: width (default 1920), height (default 1080), filename
+      // Returns: filePath to the saved PNG in Saved/Screenshots/Widgets/
+      return sendRequest('screenshot_widget');
+    }
+
+    // =========================================================================
+    // 19.18 Widget Validation (1 action)
+    // =========================================================================
+
+    case 'validate_widget_blueprint': {
+      requireNonEmptyString(argsRecord.widgetPath, 'widgetPath', 'Missing required parameter: widgetPath');
+      // Audits a widget blueprint for UMG best practices
+      // Returns: widgetCount, warningCount, warnings array
+      return sendRequest('validate_widget_blueprint');
     }
 
     // =========================================================================

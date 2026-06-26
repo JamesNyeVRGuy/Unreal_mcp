@@ -43,8 +43,21 @@ export class LevelTools extends BaseTool implements ILevelTools {
     if (!formatted.startsWith('/')) {
       formatted = formatted.startsWith('Game/') ? `/${formatted}` : `/Game/${formatted.replace(/^\/?Game\//i, '')}`;
     }
-    if (!formatted.startsWith('/Game/')) {
-      formatted = `/Game/${formatted.replace(/^\/+/, '')}`;
+    // Only prefix /Game/ for paths that don't already have a valid UE mount point.
+    // Plugin content paths (e.g., /Canopy/Tests/..., /MyPlugin/...) and engine
+    // paths (/Engine/..., /Script/...) must not be rewritten.
+    const knownRoots = ['/Game/', '/Engine/', '/Script/', '/Temp/'];
+    const hasKnownRoot = knownRoots.some(r => formatted.startsWith(r));
+    if (!hasKnownRoot && formatted.startsWith('/')) {
+      // Check if this looks like a plugin mount point (/<Name>/...)
+      // Plugin paths have at least 2 segments and the first segment is not "Game"
+      const segments = formatted.split('/').filter(Boolean);
+      if (segments.length < 2 || segments[0].toLowerCase() === 'game') {
+        formatted = `/Game/${formatted.replace(/^\/+/, '')}`;
+      }
+      // else: treat as plugin path, leave as-is
+    } else if (!formatted.startsWith('/')) {
+      formatted = `/Game/${formatted}`;
     }
 
     // Security validation

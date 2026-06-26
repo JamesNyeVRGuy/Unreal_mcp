@@ -98,11 +98,10 @@ bool UMcpAutomationBridgeSubsystem::HandleWorldPartitionAction(const FString& Re
     
     if (!LevelPath.IsEmpty())
     {
-        // Normalize the level path
+        // Normalize the level path — prepend /Game/ only for relative paths
         FString NormalizedLevelPath = LevelPath;
-        if (!NormalizedLevelPath.StartsWith(TEXT("/Game/")) && !NormalizedLevelPath.StartsWith(TEXT("/Engine/")))
+        if (!NormalizedLevelPath.StartsWith(TEXT("/")))
         {
-            // Try treating as relative to /Game/
             NormalizedLevelPath = TEXT("/Game/") + NormalizedLevelPath;
         }
         

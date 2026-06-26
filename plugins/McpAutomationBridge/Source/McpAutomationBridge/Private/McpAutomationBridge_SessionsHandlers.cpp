@@ -928,13 +928,25 @@ bool UMcpAutomationBridgeSubsystem::HandleManageSessionsAction(
     TSharedPtr<FMcpBridgeWebSocket> Socket)
 {
 #if WITH_EDITOR
+    // Only handle the manage_sessions bridge action. Without this guard the
+    // handler swallows every action that reaches it un-claimed (it reads the
+    // sub-action from the payload and returns true with an "Unknown manage_sessions
+    // action" error), stopping dispatch before later handlers run. That made
+    // unrelated actions whose handler is registered after this point (e.g.
+    // set_component_default in a build where the blueprint handler didn't claim it)
+    // fail with a misleading sessions error. Same bug class as the skeleton guard.
+    if (Action != TEXT("manage_sessions"))
+    {
+        return false; // not a sessions request -- let dispatch continue
+    }
+
     // Extract sub-action from payload
     FString SubAction;
     if (Payload.IsValid() && Payload->HasField(TEXT("action")))
     {
         SubAction = GetStringFieldSess(Payload, TEXT("action"));
     }
-    
+
     UE_LOG(LogMcpSessionsHandlers, Log, TEXT("HandleManageSessionsAction: SubAction=%s, RequestId=%s"), *SubAction, *RequestId);
 
     bool bHandled = false;

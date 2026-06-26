@@ -31,19 +31,6 @@
 #define GetPayloadNumber GetJsonNumberField
 #define GetPayloadBool GetJsonBoolField
 
-// Helper to create a new package with path validation
-// Returns nullptr and sets OutError if path is invalid
-static UPackage* CreateValidatedAssetPackage(const FString& Path, const FString& Name, FString& OutError) {
-  FString PackageName;
-  FString SanitizedName = SanitizeAssetName(Name);
-  
-  if (!ValidateAssetCreationPath(Path, SanitizedName, PackageName, OutError)) {
-    return nullptr;
-  }
-  
-  return CreatePackage(*PackageName);
-}
-
 // Legacy helper for backward compatibility - validates internally
 static UPackage* CreateAssetPackage(const FString& Path, const FString& Name) {
   FString PackagePath = Path.IsEmpty() ? TEXT("/Game/Items") : Path;

@@ -213,16 +213,31 @@ static FString NormalizeAudioPath(const FString& Path)
 
 // Helper to save asset - UE 5.7+ Fix: Do not save immediately to avoid modal dialogs.
 // modal progress dialogs that block automation. Instead, just mark dirty and notify registry.
+// Modify path: just mark dirty. Calling FAssetRegistryModule::AssetCreated on
+// an asset that already exists fires OnAssetAdded delegates that wedge against
+// the registry's pending work after a recent move/rename, producing apparent
+// stalls in set_class_properties / set_class_parent / Cue mods. The editor
+// will pick up dirty state on the next save without any registry notification.
 static bool SaveAudioAsset(UObject* Asset, bool bShouldSave)
 {
     if (!bShouldSave || !Asset)
     {
         return true;
     }
-    
-    // Mark dirty and notify asset registry - do NOT save to disk
-    // This avoids modal dialogs and allows the editor to save later
     Asset->MarkPackageDirty();
+    return true;
+}
+
+// Create path: notify the registry exactly once when a new asset comes into
+// being. Use only at genuine creation sites; using this on an existing asset
+// can produce the same stall pattern described above.
+static bool RegisterNewAudioAsset(UObject* Asset, bool bShouldSave)
+{
+    if (!Asset) return false;
+    if (bShouldSave)
+    {
+        Asset->MarkPackageDirty();
+    }
     FAssetRegistryModule::AssetCreated(Asset);
     return true;
 }
@@ -268,9 +283,9 @@ static USoundMix* LoadSoundMixFromPath(const FString& MixPath)
 static TSharedPtr<FJsonObject> HandleAudioAuthoringRequest(const TSharedPtr<FJsonObject>& Params)
 {
     TSharedPtr<FJsonObject> Response = MakeShared<FJsonObject>();
-    
+
     FString SubAction = GetStringFieldAudioAuth(Params, TEXT("subAction"), TEXT(""));
-    
+
     // ===== 11.1 Sound Cues =====
     
     if (SubAction == TEXT("create_sound_cue"))
@@ -342,8 +357,8 @@ static TSharedPtr<FJsonObject> HandleAudioAuthoringRequest(const TSharedPtr<FJso
             }
         }
         
-        SaveAudioAsset(NewCue, bSave);
-        
+        RegisterNewAudioAsset(NewCue, bSave);
+
         FString FullPath = NewCue->GetPathName();
         Response->SetStringField(TEXT("assetPath"), FullPath);
         AUDIO_SUCCESS_RESPONSE(FString::Printf(TEXT("SoundCue '%s' created"), *Name));
@@ -1142,8 +1157,8 @@ static TSharedPtr<FJsonObject> HandleAudioAuthoringRequest(const TSharedPtr<FJso
         // Set initial properties if provided
         NewClass->Properties.Volume = static_cast<float>(GetNumberFieldAudioAuth(Params, TEXT("volume"), 1.0));
         NewClass->Properties.Pitch = static_cast<float>(GetNumberFieldAudioAuth(Params, TEXT("pitch"), 1.0));
-        
-        SaveAudioAsset(NewClass, bSave);
+
+        RegisterNewAudioAsset(NewClass, bSave);
         
         FString FullPath = NewClass->GetPathName();
         Response->SetStringField(TEXT("assetPath"), FullPath);
@@ -1243,18 +1258,16 @@ static TSharedPtr<FJsonObject> HandleAudioAuthoringRequest(const TSharedPtr<FJso
             AUDIO_ERROR_RESPONSE(TEXT("Failed to create package"), TEXT("PACKAGE_ERROR"));
         }
         
-        USoundMixFactory* Factory = NewObject<USoundMixFactory>();
-        USoundMix* NewMix = Cast<USoundMix>(
-            Factory->FactoryCreateNew(USoundMix::StaticClass(), Package,
-                                      FName(*Name), RF_Public | RF_Standalone,
-                                      nullptr, GWarn));
+        // Direct construction (not the factory) to avoid the modal/flush stall
+        // path -- see create_attenuation_settings / create_sound_class notes.
+        USoundMix* NewMix = NewObject<USoundMix>(Package, FName(*Name), RF_Public | RF_Standalone);
         if (!NewMix)
         {
             AUDIO_ERROR_RESPONSE(TEXT("Failed to create SoundMix"), TEXT("CREATE_FAILED"));
         }
         
-        SaveAudioAsset(NewMix, bSave);
-        
+        RegisterNewAudioAsset(NewMix, bSave);
+
         FString FullPath = NewMix->GetPathName();
         Response->SetStringField(TEXT("assetPath"), FullPath);
         AUDIO_SUCCESS_RESPONSE(FString::Printf(TEXT("SoundMix '%s' created"), *Name));
@@ -1470,30 +1483,30 @@ static TSharedPtr<FJsonObject> HandleAudioAuthoringRequest(const TSharedPtr<FJso
         FString Name = GetStringFieldAudioAuth(Params, TEXT("name"), TEXT(""));
         FString Path = NormalizeAudioPath(GetStringFieldAudioAuth(Params, TEXT("path"), TEXT("/Game/Audio/Attenuation")));
         bool bSave = GetBoolFieldAudioAuth(Params, TEXT("save"), true);
-        
+
         if (Name.IsEmpty())
         {
             AUDIO_ERROR_RESPONSE(TEXT("Name is required"), TEXT("MISSING_NAME"));
         }
-        
-        // Create package and asset directly to avoid UI dialogs
+
+        // Create the asset via direct NewObject rather than the factory.
+        // USoundAttenuationFactory::FactoryCreateNew can surface a modal
+        // "Overwrite Existing Object" dialog (and recursive FlushRenderingCommands)
+        // that blocks the automation game thread with no response -- the same
+        // reason create_sound_class was converted to direct construction.
         FString PackagePath = Path / Name;
         UPackage* Package = CreatePackage(*PackagePath);
         if (!Package)
         {
             AUDIO_ERROR_RESPONSE(TEXT("Failed to create package"), TEXT("PACKAGE_ERROR"));
         }
-        
-        USoundAttenuationFactory* Factory = NewObject<USoundAttenuationFactory>();
-        USoundAttenuation* NewAtten = Cast<USoundAttenuation>(
-            Factory->FactoryCreateNew(USoundAttenuation::StaticClass(), Package,
-                                      FName(*Name), RF_Public | RF_Standalone,
-                                      nullptr, GWarn));
+
+        USoundAttenuation* NewAtten = NewObject<USoundAttenuation>(Package, FName(*Name), RF_Public | RF_Standalone);
         if (!NewAtten)
         {
             AUDIO_ERROR_RESPONSE(TEXT("Failed to create SoundAttenuation"), TEXT("CREATE_FAILED"));
         }
-        
+
         // Set basic attenuation properties
         if (Params->HasField(TEXT("innerRadius")))
         {
@@ -1503,9 +1516,9 @@ static TSharedPtr<FJsonObject> HandleAudioAuthoringRequest(const TSharedPtr<FJso
         {
             NewAtten->Attenuation.FalloffDistance = static_cast<float>(GetNumberFieldAudioAuth(Params, TEXT("falloffDistance"), 3600.0));
         }
-        
-        SaveAudioAsset(NewAtten, bSave);
-        
+
+        RegisterNewAudioAsset(NewAtten, bSave);
+
         FString FullPath = NewAtten->GetPathName();
         Response->SetStringField(TEXT("assetPath"), FullPath);
         AUDIO_SUCCESS_RESPONSE(FString::Printf(TEXT("SoundAttenuation '%s' created"), *Name));

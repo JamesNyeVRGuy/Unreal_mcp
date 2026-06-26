@@ -380,6 +380,23 @@ export async function handleBlueprintTools(action: string, args: HandlerArgs, to
       }) as Record<string, unknown>;
       return cleanObject(res);
     }
+    case 'set_component_default': {
+      // Set a default value on a component subobject of the Blueprint CDO.
+      // Works for native (CreateDefaultSubobject) components, which set_scs_property
+      // cannot reach. Accepts 'propertyValue' as an alias for 'value'.
+      const path = argsTyped.name || argsTyped.blueprintPath || (argsRecord.path as string) || '';
+      const resolvedValue = argsTyped.value !== undefined ? argsTyped.value : argsRecord.propertyValue;
+      const res = await executeAutomationRequest(tools, 'set_component_default', {
+        requestedPath: path,
+        blueprintPath: path,
+        blueprintCandidates: [path],
+        componentName: argsTyped.componentName ?? '',
+        propertyName: argsTyped.propertyName ?? '',
+        value: resolvedValue,
+        timeoutMs: argsRecord.timeoutMs as number | undefined
+      }) as Record<string, unknown>;
+      return cleanObject(res);
+    }
     case 'get_scs': {
       const res = await executeAutomationRequest(tools, 'get_blueprint_scs', {
         blueprint_path: argsTyped.name || argsTyped.blueprintPath || (argsRecord.path as string) || '',

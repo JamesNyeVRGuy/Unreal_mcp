@@ -1390,6 +1390,48 @@ export async function handleAnimationAuthoringTools(
         return ResponseFactory.success(res, res.message ?? 'Animation info retrieved');
       }
 
+      // ===== AnimBP introspection (read-only) =====
+      // assetPath is canonical; animBpPath / animPath / blueprintPath accepted as aliases
+      // so callers don't have to remember a per-action parameter name.
+      case 'list_anim_state_machines':
+      case 'get_anim_graph':
+      case 'list_linked_anim_layers': {
+        const params = normalizeArgs(args, [
+          { key: 'assetPath', aliases: ['animBpPath', 'animPath', 'blueprintPath', 'animationBlueprintPath'], required: true },
+        ]);
+        const assetPath = extractString(params, 'assetPath');
+        const res = (await executeAutomationRequest(tools, 'manage_animation_authoring', {
+          subAction: action,
+          assetPath,
+          animBpPath: assetPath,
+          blueprintPath: assetPath,
+        })) as AutomationResponse;
+        if (res.success === false) {
+          return ResponseFactory.error(res.error ?? `${action} failed`, res.errorCode);
+        }
+        return ResponseFactory.success(res, res.message ?? `${action} succeeded`);
+      }
+
+      case 'get_anim_state_machine': {
+        const params = normalizeArgs(args, [
+          { key: 'assetPath', aliases: ['animBpPath', 'animPath', 'blueprintPath', 'animationBlueprintPath'], required: true },
+          { key: 'machineName', required: true },
+        ]);
+        const assetPath = extractString(params, 'assetPath');
+        const machineName = extractString(params, 'machineName');
+        const res = (await executeAutomationRequest(tools, 'manage_animation_authoring', {
+          subAction: 'get_anim_state_machine',
+          assetPath,
+          animBpPath: assetPath,
+          blueprintPath: assetPath,
+          machineName,
+        })) as AutomationResponse;
+        if (res.success === false) {
+          return ResponseFactory.error(res.error ?? 'get_anim_state_machine failed', res.errorCode);
+        }
+        return ResponseFactory.success(res, res.message ?? `State machine ${machineName} inspected`);
+      }
+
       default:
         return ResponseFactory.error(`Unknown animation authoring action: ${action}`, 'UNKNOWN_ACTION');
     }

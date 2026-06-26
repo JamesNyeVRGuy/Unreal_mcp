@@ -3066,10 +3066,14 @@ bool UMcpAutomationBridgeSubsystem::HandleManageSkeleton(
     const TSharedPtr<FJsonObject>& Payload,
     TSharedPtr<FMcpBridgeWebSocket> RequestingSocket)
 {
-    // Only handle manage_skeleton action
+    // Only handle manage_skeleton action. Returning false lets the dispatcher
+    // continue to later handlers -- returning true here wrongly consumed every
+    // non-skeleton action that reached this point (e.g. manage_audio_authoring,
+    // whose handler is registered later in the chain), leaving the request with
+    // no response so the caller hung.
     if (Action != TEXT("manage_skeleton"))
     {
-        return true; // Not handled
+        return false; // Not handled -- let dispatch continue
     }
 
     // Read subAction from payload (the actual operation to perform)
@@ -3233,12 +3237,16 @@ bool UMcpAutomationBridgeSubsystem::HandleManageSkeleton(
         }
         
         // SECURITY: Validate path to prevent path traversal attacks
-        // Ensure path starts with /Game/ and contains no traversal sequences
+        // Allow /Game/, /Engine/, /Temp/, or any valid plugin mount point
         if (!SkeletonPath.StartsWith(TEXT("/Game/")) && !SkeletonPath.StartsWith(TEXT("/Engine/")) && !SkeletonPath.StartsWith(TEXT("/Temp/")))
         {
-            SendAutomationError(RequestingSocket, RequestId, 
-                TEXT("Invalid path. Path must start with /Game/, /Engine/, or /Temp/"), TEXT("INVALID_PATH"));
-            return true;
+            FText ValidationReason;
+            if (!FPackageName::IsValidLongPackageName(SkeletonPath, true, &ValidationReason))
+            {
+                SendAutomationError(RequestingSocket, RequestId,
+                    FString::Printf(TEXT("Invalid path: %s"), *ValidationReason.ToString()), TEXT("INVALID_PATH"));
+                return true;
+            }
         }
         
         // Check for path traversal attempts

@@ -71,7 +71,7 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
       case 'list': {
         // Route through C++ HandleListAssets for proper asset enumeration
         const params = normalizeArgs(args, [
-          { key: 'path', aliases: ['directory', 'assetPath'], default: '/Game' },
+          { key: 'path', aliases: ['directory', 'directoryPath', 'assetPath', 'folderPath', 'searchPath'], default: '/Game' },
           { key: 'limit', default: 50 },
           { key: 'recursive', default: false },
           { key: 'depth', default: undefined }
@@ -143,6 +143,20 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
           subAction: 'create_folder'
         }) as AssetOperationResponse;
         return ResponseFactory.success(res, 'Folder created successfully');
+      }
+      case 'batch_import': {
+        const files = (args as Record<string, unknown>).files;
+        if (!Array.isArray(files) || files.length === 0) {
+          return ResponseFactory.error('files array is required for batch_import');
+        }
+        const destinationPath = typeof (args as Record<string, unknown>).destinationPath === 'string'
+          ? ((args as Record<string, unknown>).destinationPath as string).trim() : '';
+        const res = await executeAutomationRequest(tools, 'manage_asset', {
+          files,
+          destinationPath,
+          subAction: 'batch_import'
+        }) as AssetOperationResponse;
+        return ResponseFactory.success(res, 'Batch import completed');
       }
       case 'import': {
         const params = normalizeArgs(args, [
@@ -462,22 +476,27 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
       case 'search_assets': {
         const params = normalizeArgs(args, [
           { key: 'classNames' },
-          { key: 'packagePaths' },
+          { key: 'packagePaths', aliases: ['paths'] },
           { key: 'recursivePaths' },
           { key: 'recursiveClasses' },
-          { key: 'limit' }
+          { key: 'limit' },
+          { key: 'searchText', aliases: ['name', 'nameContains', 'searchString'] }
         ]);
         const classNames = extractOptionalArray<string>(params, 'classNames');
         const packagePaths = extractOptionalArray<string>(params, 'packagePaths');
-        const recursivePaths = extractOptionalBoolean(params, 'recursivePaths');
+        // Default recursivePaths to true: searching one folder non-recursively returns
+        // almost nothing and is rarely what callers want.
+        const recursivePaths = extractOptionalBoolean(params, 'recursivePaths') ?? true;
         const recursiveClasses = extractOptionalBoolean(params, 'recursiveClasses');
         const limit = extractOptionalNumber(params, 'limit');
+        const searchText = extractOptionalString(params, 'searchText');
         const res = await executeAutomationRequest(tools, 'asset_query', {
           classNames,
           packagePaths,
           recursivePaths,
           recursiveClasses,
           limit,
+          searchText,
           subAction: 'search_assets'
         }) as AssetOperationResponse;
         return ResponseFactory.success(res, 'Assets found');

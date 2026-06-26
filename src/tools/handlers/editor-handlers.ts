@@ -12,6 +12,8 @@ const EDITOR_ACTION_ALIASES: Record<string, string> = {
   'set_camera_position': 'set_camera',
   'set_viewport_camera': 'set_camera',
   'take_screenshot': 'screenshot',
+  'screenshot_window': 'screenshot_editor',
+  'screenshot_editor': 'screenshot_editor',
   'close_asset': 'close_asset',
   'save_all': 'save_all',
   'undo': 'undo',
@@ -60,6 +62,7 @@ const ACTION_REQUIRED_PARAMS: Record<string, string[]> = {
   'set_game_speed': ['speed'],
   'set_fixed_delta_time': ['deltaTime'],
   'screenshot': ['filename'],
+  'screenshot_editor': ['filename'],
   'set_preferences': ['category', 'preferences'],
   'execute_command': ['command'],
   'console_command': ['command'],
@@ -90,7 +93,8 @@ const ACTION_ALLOWED_PARAMS: Record<string, string[]> = {
   'set_camera_fov': ['fov'],
   'set_game_speed': ['speed'],
   'set_fixed_delta_time': ['deltaTime'],
-  'screenshot': ['filename', 'resolution'],
+  'screenshot': ['filename', 'resolution', 'showUI', 'includeUI', 'cropX', 'cropY', 'cropWidth', 'cropHeight'],
+  'screenshot_editor': ['filename'],
   'set_preferences': ['category', 'preferences', 'section', 'key', 'value'],
   'execute_command': ['command'],
   'console_command': ['command'],
@@ -191,7 +195,18 @@ export async function handleEditorTools(action: string, args: EditorArgs, tools:
       return cleanObject(res);
     }
     case 'screenshot': {
-      const res = await executeAutomationRequest(tools, 'control_editor', { action: 'screenshot', filename: args.filename, resolution: args.resolution }) as Record<string, unknown>;
+      const payload: Record<string, unknown> = { action: 'screenshot', filename: args.filename, resolution: args.resolution };
+      if (args.showUI !== undefined) payload.showUI = args.showUI;
+      if (args.includeUI !== undefined) payload.includeUI = args.includeUI;
+      if (args.cropX !== undefined) payload.cropX = args.cropX;
+      if (args.cropY !== undefined) payload.cropY = args.cropY;
+      if (args.cropWidth !== undefined) payload.cropWidth = args.cropWidth;
+      if (args.cropHeight !== undefined) payload.cropHeight = args.cropHeight;
+      const res = await executeAutomationRequest(tools, 'control_editor', payload) as Record<string, unknown>;
+      return cleanObject(res);
+    }
+    case 'screenshot_editor': {
+      const res = await executeAutomationRequest(tools, 'control_editor', { action: 'screenshot_editor', filename: args.filename }) as Record<string, unknown>;
       return cleanObject(res);
     }
     case 'console_command': {

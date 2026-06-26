@@ -244,6 +244,20 @@ export async function handleLevelTools(action: string, args: HandlerArgs, tools:
       }) as Record<string, unknown>;
       return cleanObject(res);
     }
+    case 'build_all':
+    case 'build_all_level': {
+      const res = await executeAutomationRequest(tools, 'manage_level', {
+        action: 'build_all_level'
+      }) as Record<string, unknown>;
+      return cleanObject(res);
+    }
+    case 'build_navigation':
+    case 'build_level_navigation': {
+      const res = await executeAutomationRequest(tools, 'manage_level', {
+        action: 'build_level_navigation'
+      }) as Record<string, unknown>;
+      return cleanObject(res);
+    }
     case 'export_level': {
       const res = await executeAutomationRequest(tools, 'manage_level', {
         action: 'export_level',

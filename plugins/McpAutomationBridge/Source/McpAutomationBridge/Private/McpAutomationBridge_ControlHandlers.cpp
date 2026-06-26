@@ -6,6 +6,13 @@
 #include "McpAutomationBridgeHelpers.h"
 #include "McpAutomationBridgeSubsystem.h"
 #include "Misc/ScopeExit.h"
+#include "Misc/FileHelper.h"
+#include "HAL/PlatformFileManager.h"
+#include "IImageWrapperModule.h"
+#include "IImageWrapper.h"
+#include "ImageUtils.h"
+#include "Containers/Ticker.h"
+#include "Engine/GameViewportClient.h"
 
 #if WITH_EDITOR
 #include "EditorAssetLibrary.h"
@@ -71,6 +78,10 @@
 #include "Exporters/Exporter.h"
 #include "Misc/OutputDevice.h"
 #include "UnrealClient.h" // For FScreenshotRequest
+#include "ContentBrowserModule.h"
+#include "IContentBrowserSingleton.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "Misc/PackageName.h"
 
 #endif
 
@@ -2490,6 +2501,345 @@ bool UMcpAutomationBridgeSubsystem::HandleControlActorAction(
   if (LowerSub == TEXT("call_function") || LowerSub == TEXT("call_actor_function"))
     return HandleControlActorCallFunction(RequestId, Payload, RequestingSocket);
 
+  // --- Actor selection ---
+  if (LowerSub == TEXT("select") || LowerSub == TEXT("select_actor") || LowerSub == TEXT("set_selection"))
+  {
+    UEditorActorSubsystem* EditorActorSub = GEditor->GetEditorSubsystem<UEditorActorSubsystem>();
+    if (!EditorActorSub)
+    {
+      SendStandardErrorResponse(this, RequestingSocket, RequestId, TEXT("SUBSYSTEM_UNAVAILABLE"),
+                                TEXT("EditorActorSubsystem not available"), nullptr);
+      return true;
+    }
+
+    // Clear existing selection first unless additive
+    bool bAdditive = false;
+    if (Payload->HasField(TEXT("additive")))
+      Payload->TryGetBoolField(TEXT("additive"), bAdditive);
+
+    if (!bAdditive)
+      GEditor->SelectNone(true, true, false);
+
+    // Accept single actorName or array of actorNames
+    TArray<FString> ActorNames;
+    FString SingleName;
+    if (Payload->TryGetStringField(TEXT("actorName"), SingleName) && !SingleName.IsEmpty())
+    {
+      ActorNames.Add(SingleName);
+    }
+    const TArray<TSharedPtr<FJsonValue>>* NamesArray = nullptr;
+    if (Payload->TryGetArrayField(TEXT("actorNames"), NamesArray) && NamesArray)
+    {
+      for (const auto& Val : *NamesArray)
+      {
+        FString N;
+        if (Val->TryGetString(N) && !N.IsEmpty())
+          ActorNames.Add(N);
+      }
+    }
+
+    UWorld* World = GEditor->GetEditorWorldContext().World();
+    TArray<FString> Selected;
+    TArray<FString> NotFound;
+    if (World)
+    {
+      for (const FString& Name : ActorNames)
+      {
+        bool bFound = false;
+        for (TActorIterator<AActor> It(World); It; ++It)
+        {
+          if (It->GetActorLabel().Equals(Name, ESearchCase::IgnoreCase) ||
+              It->GetName().Equals(Name, ESearchCase::IgnoreCase))
+          {
+            GEditor->SelectActor(*It, true, true, false);
+            Selected.Add(It->GetActorLabel());
+            bFound = true;
+            break;
+          }
+        }
+        if (!bFound)
+          NotFound.Add(Name);
+      }
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetNumberField(TEXT("selectedCount"), Selected.Num());
+    TArray<TSharedPtr<FJsonValue>> SelArr;
+    for (const FString& S : Selected)
+      SelArr.Add(MakeShared<FJsonValueString>(S));
+    Result->SetArrayField(TEXT("selected"), SelArr);
+    if (NotFound.Num() > 0)
+    {
+      TArray<TSharedPtr<FJsonValue>> NfArr;
+      for (const FString& S : NotFound)
+        NfArr.Add(MakeShared<FJsonValueString>(S));
+      Result->SetArrayField(TEXT("notFound"), NfArr);
+    }
+    SendAutomationResponse(RequestingSocket, RequestId, true,
+                           FString::Printf(TEXT("Selected %d actors"), Selected.Num()), Result);
+    return true;
+  }
+
+  // --- Actor rename (set label) ---
+  if (LowerSub == TEXT("rename") || LowerSub == TEXT("rename_actor") || LowerSub == TEXT("set_label") || LowerSub == TEXT("set_actor_label"))
+  {
+    FString ActorName;
+    Payload->TryGetStringField(TEXT("actorName"), ActorName);
+    FString NewLabel;
+    Payload->TryGetStringField(TEXT("newName"), NewLabel);
+    if (NewLabel.IsEmpty())
+      Payload->TryGetStringField(TEXT("label"), NewLabel);
+
+    if (ActorName.IsEmpty() || NewLabel.IsEmpty())
+    {
+      SendStandardErrorResponse(this, RequestingSocket, RequestId, TEXT("INVALID_ARGUMENT"),
+                                TEXT("actorName and newName are required"), nullptr);
+      return true;
+    }
+
+    UWorld* World = GEditor->GetEditorWorldContext().World();
+    AActor* FoundActor = nullptr;
+    if (World)
+    {
+      for (TActorIterator<AActor> It(World); It; ++It)
+      {
+        if (It->GetActorLabel().Equals(ActorName, ESearchCase::IgnoreCase) ||
+            It->GetName().Equals(ActorName, ESearchCase::IgnoreCase))
+        {
+          FoundActor = *It;
+          break;
+        }
+      }
+    }
+
+    if (!FoundActor)
+    {
+      SendStandardErrorResponse(this, RequestingSocket, RequestId, TEXT("ACTOR_NOT_FOUND"),
+                                FString::Printf(TEXT("Actor not found: %s"), *ActorName), nullptr);
+      return true;
+    }
+
+    FString OldLabel = FoundActor->GetActorLabel();
+    FoundActor->SetActorLabel(NewLabel);
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("oldLabel"), OldLabel);
+    Result->SetStringField(TEXT("newLabel"), FoundActor->GetActorLabel());
+    Result->SetStringField(TEXT("actorName"), FoundActor->GetName());
+    SendAutomationResponse(RequestingSocket, RequestId, true,
+                           FString::Printf(TEXT("Renamed '%s' to '%s'"), *OldLabel, *NewLabel), Result);
+    return true;
+  }
+
+  // --- Move actor to outliner folder ---
+  if (LowerSub == TEXT("set_folder") || LowerSub == TEXT("set_actor_folder") || LowerSub == TEXT("move_to_folder"))
+  {
+    FString ActorName;
+    Payload->TryGetStringField(TEXT("actorName"), ActorName);
+    FString FolderPath;
+    Payload->TryGetStringField(TEXT("folderPath"), FolderPath);
+    if (FolderPath.IsEmpty())
+      Payload->TryGetStringField(TEXT("folder"), FolderPath);
+
+    if (ActorName.IsEmpty())
+    {
+      SendStandardErrorResponse(this, RequestingSocket, RequestId, TEXT("INVALID_ARGUMENT"),
+                                TEXT("actorName is required"), nullptr);
+      return true;
+    }
+
+    UWorld* World = GEditor->GetEditorWorldContext().World();
+    AActor* FoundActor = nullptr;
+    if (World)
+    {
+      for (TActorIterator<AActor> It(World); It; ++It)
+      {
+        if (It->GetActorLabel().Equals(ActorName, ESearchCase::IgnoreCase) ||
+            It->GetName().Equals(ActorName, ESearchCase::IgnoreCase))
+        {
+          FoundActor = *It;
+          break;
+        }
+      }
+    }
+
+    if (!FoundActor)
+    {
+      SendStandardErrorResponse(this, RequestingSocket, RequestId, TEXT("ACTOR_NOT_FOUND"),
+                                FString::Printf(TEXT("Actor not found: %s"), *ActorName), nullptr);
+      return true;
+    }
+
+    FName OldFolder = FoundActor->GetFolderPath();
+    FoundActor->SetFolderPath(FName(*FolderPath));
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("actorName"), FoundActor->GetActorLabel());
+    Result->SetStringField(TEXT("oldFolder"), OldFolder.ToString());
+    Result->SetStringField(TEXT("newFolder"), FolderPath);
+    SendAutomationResponse(RequestingSocket, RequestId, true,
+                           FString::Printf(TEXT("Moved '%s' to folder '%s'"), *FoundActor->GetActorLabel(), *FolderPath), Result);
+    return true;
+  }
+
+  // --- Convert/replace actor class ---
+  if (LowerSub == TEXT("convert") || LowerSub == TEXT("convert_actor") || LowerSub == TEXT("replace_actor_class"))
+  {
+    FString ActorName;
+    Payload->TryGetStringField(TEXT("actorName"), ActorName);
+    FString NewClassName;
+    Payload->TryGetStringField(TEXT("newClass"), NewClassName);
+    if (NewClassName.IsEmpty())
+      Payload->TryGetStringField(TEXT("className"), NewClassName);
+
+    if (ActorName.IsEmpty() || NewClassName.IsEmpty())
+    {
+      SendStandardErrorResponse(this, RequestingSocket, RequestId, TEXT("INVALID_ARGUMENT"),
+                                TEXT("actorName and newClass are required"), nullptr);
+      return true;
+    }
+
+    UWorld* World = GEditor->GetEditorWorldContext().World();
+    AActor* FoundActor = nullptr;
+    if (World)
+    {
+      for (TActorIterator<AActor> It(World); It; ++It)
+      {
+        if (It->GetActorLabel().Equals(ActorName, ESearchCase::IgnoreCase) ||
+            It->GetName().Equals(ActorName, ESearchCase::IgnoreCase))
+        {
+          FoundActor = *It;
+          break;
+        }
+      }
+    }
+
+    if (!FoundActor)
+    {
+      SendStandardErrorResponse(this, RequestingSocket, RequestId, TEXT("ACTOR_NOT_FOUND"),
+                                FString::Printf(TEXT("Actor not found: %s"), *ActorName), nullptr);
+      return true;
+    }
+
+    // Find the target class
+    UClass* NewClass = FindObject<UClass>(nullptr, *NewClassName);
+    if (!NewClass)
+      NewClass = LoadObject<UClass>(nullptr, *NewClassName);
+    if (!NewClass)
+    {
+      // Try common prefix patterns
+      FString ClassPath = FString::Printf(TEXT("/Script/Engine.%s"), *NewClassName);
+      NewClass = LoadObject<UClass>(nullptr, *ClassPath);
+    }
+
+    if (!NewClass || !NewClass->IsChildOf(AActor::StaticClass()))
+    {
+      SendStandardErrorResponse(this, RequestingSocket, RequestId, TEXT("CLASS_NOT_FOUND"),
+                                FString::Printf(TEXT("Actor class not found: %s"), *NewClassName), nullptr);
+      return true;
+    }
+
+    // Capture transform and properties
+    FTransform OldTransform = FoundActor->GetActorTransform();
+    FString OldLabel = FoundActor->GetActorLabel();
+    FName OldFolder = FoundActor->GetFolderPath();
+    TArray<FName> OldTags;
+    for (const FName& Tag : FoundActor->Tags)
+      OldTags.Add(Tag);
+
+    // Spawn new actor
+    FActorSpawnParameters SpawnParams;
+    SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+    AActor* NewActor = World->SpawnActor(NewClass, &OldTransform, SpawnParams);
+    if (!NewActor)
+    {
+      SendStandardErrorResponse(this, RequestingSocket, RequestId, TEXT("SPAWN_FAILED"),
+                                TEXT("Failed to spawn replacement actor"), nullptr);
+      return true;
+    }
+
+    // Transfer properties
+    NewActor->SetActorLabel(OldLabel);
+    NewActor->SetFolderPath(OldFolder);
+    for (const FName& Tag : OldTags)
+      NewActor->Tags.Add(Tag);
+
+    // Destroy old actor
+    FoundActor->Destroy();
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("newActorName"), NewActor->GetName());
+    Result->SetStringField(TEXT("newActorLabel"), NewActor->GetActorLabel());
+    Result->SetStringField(TEXT("newClass"), NewClass->GetName());
+    SendAutomationResponse(RequestingSocket, RequestId, true,
+                           FString::Printf(TEXT("Converted '%s' to %s"), *OldLabel, *NewClass->GetName()), Result);
+    return true;
+  }
+
+  // --- Group actors ---
+  if (LowerSub == TEXT("group") || LowerSub == TEXT("group_actors"))
+  {
+    const TArray<TSharedPtr<FJsonValue>>* NamesArray = nullptr;
+    if (!Payload->TryGetArrayField(TEXT("actorNames"), NamesArray) || !NamesArray || NamesArray->Num() < 2)
+    {
+      SendStandardErrorResponse(this, RequestingSocket, RequestId, TEXT("INVALID_ARGUMENT"),
+                                TEXT("actorNames array with at least 2 actors required"), nullptr);
+      return true;
+    }
+
+    UWorld* World = GEditor->GetEditorWorldContext().World();
+    if (!World)
+    {
+      SendStandardErrorResponse(this, RequestingSocket, RequestId, TEXT("NO_WORLD"),
+                                TEXT("No editor world available"), nullptr);
+      return true;
+    }
+
+    // Select the actors for grouping
+    GEditor->SelectNone(true, true, false);
+    TArray<FString> Grouped;
+    for (const auto& Val : *NamesArray)
+    {
+      FString Name;
+      if (!Val->TryGetString(Name)) continue;
+      for (TActorIterator<AActor> It(World); It; ++It)
+      {
+        if (It->GetActorLabel().Equals(Name, ESearchCase::IgnoreCase) ||
+            It->GetName().Equals(Name, ESearchCase::IgnoreCase))
+        {
+          GEditor->SelectActor(*It, true, true, false);
+          Grouped.Add(It->GetActorLabel());
+          break;
+        }
+      }
+    }
+
+    // Use the folder-based grouping approach (reliable across UE versions)
+    FString GroupFolder;
+    Payload->TryGetStringField(TEXT("folderPath"), GroupFolder);
+    if (GroupFolder.IsEmpty())
+      Payload->TryGetStringField(TEXT("groupName"), GroupFolder);
+    if (GroupFolder.IsEmpty())
+      GroupFolder = TEXT("Group");
+
+    for (TActorIterator<AActor> It(World); It; ++It)
+    {
+      if (It->IsSelected())
+        It->SetFolderPath(FName(*GroupFolder));
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetNumberField(TEXT("groupedCount"), Grouped.Num());
+    Result->SetStringField(TEXT("folderPath"), GroupFolder);
+    TArray<TSharedPtr<FJsonValue>> GArr;
+    for (const FString& S : Grouped)
+      GArr.Add(MakeShared<FJsonValueString>(S));
+    Result->SetArrayField(TEXT("actors"), GArr);
+    SendAutomationResponse(RequestingSocket, RequestId, true,
+                           FString::Printf(TEXT("Grouped %d actors into '%s'"), Grouped.Num(), *GroupFolder), Result);
+    return true;
+  }
+
   SendStandardErrorResponse(
       this, RequestingSocket, RequestId, TEXT("UNKNOWN_ACTION"),
       FString::Printf(TEXT("Unknown actor control action: %s"), *LowerSub), nullptr);
@@ -2824,6 +3174,8 @@ bool UMcpAutomationBridgeSubsystem::HandleControlEditorAction(
     return HandleControlEditorOpenAsset(RequestId, Payload, RequestingSocket);
   if (LowerSub == TEXT("screenshot") || LowerSub == TEXT("take_screenshot"))
     return HandleControlEditorScreenshot(RequestId, Payload, RequestingSocket);
+  if (LowerSub == TEXT("screenshot_editor") || LowerSub == TEXT("screenshot_window"))
+    return HandleControlEditorScreenshotWindow(RequestId, Payload, RequestingSocket);
   if (LowerSub == TEXT("pause"))
     return HandleControlEditorPause(RequestId, Payload, RequestingSocket);
   if (LowerSub == TEXT("resume"))
@@ -2846,6 +3198,8 @@ bool UMcpAutomationBridgeSubsystem::HandleControlEditorAction(
     return HandleControlEditorSetViewportRealtime(RequestId, Payload, RequestingSocket);
   if (LowerSub == TEXT("simulate_input"))
     return HandleControlEditorSimulateInput(RequestId, Payload, RequestingSocket);
+  if (LowerSub == TEXT("browse_to") || LowerSub == TEXT("navigate_content_browser"))
+    return HandleControlEditorBrowseTo(RequestId, Payload, RequestingSocket);
   // Additional actions for test compatibility
   if (LowerSub == TEXT("close_asset"))
     return HandleControlEditorCloseAsset(RequestId, Payload, RequestingSocket);
@@ -2871,6 +3225,53 @@ bool UMcpAutomationBridgeSubsystem::HandleControlEditorAction(
     return HandleControlEditorSetFixedDeltaTime(RequestId, Payload, RequestingSocket);
   if (LowerSub == TEXT("open_level"))
     return HandleControlEditorOpenLevel(RequestId, Payload, RequestingSocket);
+
+  // --- Focus viewport on actor ---
+  if (LowerSub == TEXT("focus_actor") || LowerSub == TEXT("frame_actor"))
+  {
+    FString ActorName;
+    Payload->TryGetStringField(TEXT("actorName"), ActorName);
+    if (ActorName.IsEmpty())
+    {
+      SendStandardErrorResponse(this, RequestingSocket, RequestId, TEXT("INVALID_ARGUMENT"),
+                                TEXT("actorName is required"), nullptr);
+      return true;
+    }
+
+    UWorld* World = GEditor->GetEditorWorldContext().World();
+    AActor* FoundActor = nullptr;
+    if (World)
+    {
+      for (TActorIterator<AActor> It(World); It; ++It)
+      {
+        if (It->GetActorLabel().Equals(ActorName, ESearchCase::IgnoreCase) ||
+            It->GetName().Equals(ActorName, ESearchCase::IgnoreCase))
+        {
+          FoundActor = *It;
+          break;
+        }
+      }
+    }
+
+    if (!FoundActor)
+    {
+      SendStandardErrorResponse(this, RequestingSocket, RequestId, TEXT("ACTOR_NOT_FOUND"),
+                                FString::Printf(TEXT("Actor not found: %s"), *ActorName), nullptr);
+      return true;
+    }
+
+    GEditor->SelectNone(true, true, false);
+    GEditor->SelectActor(FoundActor, true, true, false);
+    GEditor->MoveViewportCamerasToActor(*FoundActor, false);
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("actorName"), FoundActor->GetActorLabel());
+    FVector Loc = FoundActor->GetActorLocation();
+    Result->SetStringField(TEXT("location"), FString::Printf(TEXT("%.1f, %.1f, %.1f"), Loc.X, Loc.Y, Loc.Z));
+    SendAutomationResponse(RequestingSocket, RequestId, true,
+                           FString::Printf(TEXT("Focused viewport on '%s'"), *FoundActor->GetActorLabel()), Result);
+    return true;
+  }
 
   SendStandardErrorResponse(
       this, RequestingSocket, RequestId, TEXT("UNKNOWN_ACTION"),
@@ -2981,31 +3382,345 @@ bool UMcpAutomationBridgeSubsystem::HandleControlEditorScreenshot(
   IFileManager::Get().MakeDirectory(*ScreenshotDir, true);
   const FString FullPath = ScreenshotDir / Filename;
 
-  // Get the active viewport
-  FViewport* Viewport = GEditor->GetActiveViewport();
-  if (!Viewport) {
-    SendStandardErrorResponse(this, Socket, RequestId, TEXT("VIEWPORT_NOT_AVAILABLE"),
-                              TEXT("No active viewport available"), nullptr);
-    return true;
+  // Determine UI inclusion
+  bool bShowUI = true;
+  if (Payload->HasField(TEXT("showUI")))
+  {
+    bShowUI = GetJsonBoolField(Payload, TEXT("showUI"));
+  }
+  else if (Payload->HasField(TEXT("includeUI")))
+  {
+    bShowUI = GetJsonBoolField(Payload, TEXT("includeUI"));
   }
 
-  // Request a screenshot
-  bool bCaptured = false;
-  FScreenshotRequest::RequestScreenshot(FullPath, false, false);
-  
-  // Since screenshot is async, we respond with the expected path
-  TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
-  Resp->SetBoolField(TEXT("success"), true);
-  Resp->SetStringField(TEXT("filename"), Filename);
-  Resp->SetStringField(TEXT("path"), FullPath);
-  Resp->SetStringField(TEXT("message"), TEXT("Screenshot request submitted"));
-  
-  SendAutomationResponse(Socket, RequestId, true,
-                         TEXT("Screenshot requested"), Resp, FString());
+  // Parse optional crop region now (before the async callback)
+  double CropXParam = GetJsonNumberField(Payload, TEXT("cropX"), -1.0);
+  double CropYParam = GetJsonNumberField(Payload, TEXT("cropY"), -1.0);
+  double CropWParam = GetJsonNumberField(Payload, TEXT("cropWidth"), -1.0);
+  double CropHParam = GetJsonNumberField(Payload, TEXT("cropHeight"), -1.0);
+  bool bWantsCrop = (CropXParam >= 0.0 || CropYParam >= 0.0 || CropWParam > 0.0 || CropHParam > 0.0);
+
+  // Capture locals for the async ticker callback
+  FString CapturedRequestId = RequestId;
+  FString CapturedFullPath = FullPath;
+  FString CapturedFilename = Filename;
+  TSharedPtr<FMcpBridgeWebSocket> CapturedSocket = Socket;
+  TWeakObjectPtr<UMcpAutomationBridgeSubsystem> WeakThis(this);
+
+  // Delete existing file so we can detect when the new one is written
+  IFileManager::Get().Delete(*FullPath, false, true, true);
+
+  // Use file-based FScreenshotRequest which writes to disk including HUD.
+  // Then poll for the file via a ticker and post-crop if needed.
+  FScreenshotRequest::RequestScreenshot(FullPath, bShowUI, false);
+
+  // Poll for the file asynchronously using a ticker (doesn't block the game thread)
+  double TimeoutAt = FPlatformTime::Seconds() + 10.0;
+  FTSTicker::GetCoreTicker().AddTicker(
+    FTickerDelegate::CreateLambda(
+      [WeakThis, CapturedRequestId, CapturedFullPath, CapturedFilename, CapturedSocket,
+       bWantsCrop, CropXParam, CropYParam, CropWParam, CropHParam, bShowUI, TimeoutAt]
+      (float) -> bool
+      {
+        // Check if file exists yet
+        if (!IFileManager::Get().FileExists(*CapturedFullPath))
+        {
+          // Timeout check
+          if (FPlatformTime::Seconds() > TimeoutAt)
+          {
+            UMcpAutomationBridgeSubsystem* Self = WeakThis.Get();
+            if (Self && CapturedSocket.IsValid())
+            {
+              SendStandardErrorResponse(Self, CapturedSocket, CapturedRequestId,
+                TEXT("TIMEOUT"),
+                TEXT("Screenshot timed out (10s). Ensure PIE is running."),
+                nullptr);
+            }
+            return false; // Stop ticking
+          }
+          return true; // Keep polling
+        }
+
+        // File exists -- wait a bit for write to complete, then process
+        UMcpAutomationBridgeSubsystem* Self = WeakThis.Get();
+        if (!Self || !CapturedSocket.IsValid()) return false;
+
+        // Load the file
+        TArray<uint8> FileData;
+        FFileHelper::LoadFileToArray(FileData, *CapturedFullPath);
+
+        int32 OutWidth = 0, OutHeight = 0;
+        bool bCropped = false;
+
+        // Apply crop if requested
+        if (bWantsCrop && FileData.Num() > 0)
+        {
+          IImageWrapperModule& ImageWrapperModule = FModuleManager::LoadModuleChecked<IImageWrapperModule>(FName("ImageWrapper"));
+          TSharedPtr<IImageWrapper> ImageWrapper = ImageWrapperModule.CreateImageWrapper(EImageFormat::PNG);
+
+          if (ImageWrapper.IsValid() && ImageWrapper->SetCompressed(FileData.GetData(), FileData.Num()))
+          {
+            int32 SrcWidth = ImageWrapper->GetWidth();
+            int32 SrcHeight = ImageWrapper->GetHeight();
+            OutWidth = SrcWidth;
+            OutHeight = SrcHeight;
+
+            double CX = FMath::Max(CropXParam, 0.0);
+            double CY = FMath::Max(CropYParam, 0.0);
+            double CW = CropWParam > 0.0 ? CropWParam : 1.0;
+            double CH = CropHParam > 0.0 ? CropHParam : 1.0;
+
+            int32 CropX, CropY, CropW, CropH;
+            if (CX <= 1.0 && CY <= 1.0 && CW <= 1.0 && CH <= 1.0)
+            {
+              CropX = FMath::RoundToInt32(CX * SrcWidth);
+              CropY = FMath::RoundToInt32(CY * SrcHeight);
+              CropW = FMath::RoundToInt32(CW * SrcWidth);
+              CropH = FMath::RoundToInt32(CH * SrcHeight);
+            }
+            else
+            {
+              CropX = FMath::RoundToInt32(CX);
+              CropY = FMath::RoundToInt32(CY);
+              CropW = FMath::RoundToInt32(CW);
+              CropH = FMath::RoundToInt32(CH);
+            }
+
+            CropX = FMath::Clamp(CropX, 0, SrcWidth - 1);
+            CropY = FMath::Clamp(CropY, 0, SrcHeight - 1);
+            CropW = FMath::Clamp(CropW, 1, SrcWidth - CropX);
+            CropH = FMath::Clamp(CropH, 1, SrcHeight - CropY);
+
+            if (CropX != 0 || CropY != 0 || CropW != SrcWidth || CropH != SrcHeight)
+            {
+              TArray<uint8> RawData;
+              if (ImageWrapper->GetRaw(ERGBFormat::BGRA, 8, RawData))
+              {
+                OutWidth = CropW;
+                OutHeight = CropH;
+                TArray<FColor> CroppedPixels;
+                CroppedPixels.SetNum(OutWidth * OutHeight);
+                const FColor* SrcPixels = reinterpret_cast<const FColor*>(RawData.GetData());
+
+                for (int32 Row = 0; Row < OutHeight; Row++)
+                {
+                  FMemory::Memcpy(
+                    &CroppedPixels[Row * OutWidth],
+                    &SrcPixels[(CropY + Row) * SrcWidth + CropX],
+                    OutWidth * sizeof(FColor));
+                }
+
+                TArray64<uint8> CroppedPng;
+                FImageUtils::PNGCompressImageArray(OutWidth, OutHeight, CroppedPixels, CroppedPng);
+                TArrayView<const uint8> PngView(CroppedPng.GetData(), CroppedPng.Num());
+                FFileHelper::SaveArrayToFile(PngView, *CapturedFullPath);
+                bCropped = true;
+              }
+            }
+          }
+        }
+
+        // Send response
+        TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
+        Resp->SetBoolField(TEXT("success"), true);
+        Resp->SetStringField(TEXT("filename"), CapturedFilename);
+        Resp->SetStringField(TEXT("path"), CapturedFullPath);
+        if (OutWidth > 0) Resp->SetNumberField(TEXT("width"), OutWidth);
+        if (OutHeight > 0) Resp->SetNumberField(TEXT("height"), OutHeight);
+        Resp->SetBoolField(TEXT("showUI"), bShowUI);
+        Resp->SetBoolField(TEXT("cropped"), bCropped);
+        Resp->SetStringField(TEXT("message"),
+          FString::Printf(TEXT("Screenshot captured%s"),
+            bCropped ? TEXT(" (cropped)") : TEXT("")));
+
+        Self->SendAutomationResponse(CapturedSocket, CapturedRequestId, true,
+                                      TEXT("Screenshot captured"), Resp, FString());
+        return false; // Stop ticking
+      }),
+    0.1f); // Poll every 100ms
+
   return true;
 #else
   SendStandardErrorResponse(this, Socket, RequestId, TEXT("NOT_IMPLEMENTED"),
                               TEXT("Screenshot requires editor build."), nullptr);
+  return true;
+#endif
+}
+
+// PrintWindow-based editor window capture (GDI)
+#if PLATFORM_WINDOWS
+#include "Windows/AllowWindowsPlatformTypes.h"
+#include <wingdi.h>
+#include "Windows/HideWindowsPlatformTypes.h"
+#endif
+
+bool UMcpAutomationBridgeSubsystem::HandleControlEditorScreenshotWindow(
+    const FString &RequestId, const TSharedPtr<FJsonObject> &Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket) {
+#if WITH_EDITOR && PLATFORM_WINDOWS
+  if (!GEditor)
+  {
+    SendStandardErrorResponse(this, Socket, RequestId, TEXT("NO_EDITOR"),
+                              TEXT("Editor not available"), nullptr);
+    return true;
+  }
+
+  // Get optional filename
+  FString Filename;
+  Payload->TryGetStringField(TEXT("filename"), Filename);
+  if (Filename.IsEmpty())
+  {
+    Filename = FString::Printf(TEXT("EditorWindow_%s"),
+        *FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S")));
+  }
+  Filename = FPaths::GetCleanFilename(Filename);
+  if (Filename.Contains(TEXT("..")) || Filename.Contains(TEXT("/")) || Filename.Contains(TEXT("\\")))
+  {
+    Filename = FString::Printf(TEXT("EditorWindow_%s"),
+        *FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S")));
+  }
+  if (!Filename.EndsWith(TEXT(".png")))
+  {
+    Filename += TEXT(".png");
+  }
+
+  const FString ScreenshotDir = FPaths::ProjectSavedDir() / TEXT("Screenshots");
+  IFileManager::Get().MakeDirectory(*ScreenshotDir, true);
+  const FString FullPath = ScreenshotDir / Filename;
+
+  // Find the editor's main window HWND by matching our process ID
+  HWND EditorHwnd = nullptr;
+  DWORD OurPid = GetCurrentProcessId();
+
+  // EnumWindows callback to find a top-level window belonging to our process
+  struct FEnumData { DWORD Pid; HWND Result; };
+  FEnumData EnumData = { OurPid, nullptr };
+
+  EnumWindows([](HWND Hwnd, LPARAM lParam) -> BOOL
+  {
+    FEnumData* Data = reinterpret_cast<FEnumData*>(lParam);
+    DWORD WndPid = 0;
+    GetWindowThreadProcessId(Hwnd, &WndPid);
+    if (WndPid == Data->Pid && IsWindowVisible(Hwnd))
+    {
+      // Check if this looks like the main editor window (has a title)
+      TCHAR Title[256];
+      GetWindowText(Hwnd, Title, 256);
+      if (FCString::Strlen(Title) > 0)
+      {
+        Data->Result = Hwnd;
+        return 0; // Stop enumeration (FALSE)
+      }
+    }
+    return 1; // Continue enumeration (TRUE)
+  }, reinterpret_cast<LPARAM>(&EnumData));
+
+  EditorHwnd = EnumData.Result;
+  if (!EditorHwnd)
+  {
+    SendStandardErrorResponse(this, Socket, RequestId, TEXT("WINDOW_NOT_FOUND"),
+                              TEXT("Could not find editor window handle"), nullptr);
+    return true;
+  }
+
+  // Get window dimensions
+  RECT WndRect;
+  GetWindowRect(EditorHwnd, &WndRect);
+  const int32 Width = WndRect.right - WndRect.left;
+  const int32 Height = WndRect.bottom - WndRect.top;
+
+  if (Width <= 0 || Height <= 0)
+  {
+    SendStandardErrorResponse(this, Socket, RequestId, TEXT("INVALID_SIZE"),
+                              TEXT("Window has invalid dimensions"), nullptr);
+    return true;
+  }
+
+  // Capture using PrintWindow -- works even when window is not foreground
+  HDC WindowDC = GetDC(EditorHwnd);
+  HDC CaptureDC = CreateCompatibleDC(WindowDC);
+  HBITMAP CaptureBitmap = CreateCompatibleBitmap(WindowDC, Width, Height);
+  SelectObject(CaptureDC, CaptureBitmap);
+
+  // PW_RENDERFULLCONTENT (value 2) captures the full window including DWM-composed content
+  const UINT PW_RENDERFULLCONTENT = 2;
+  BOOL bPrintOk = PrintWindow(EditorHwnd, CaptureDC, PW_RENDERFULLCONTENT);
+  if (!bPrintOk)
+  {
+    // Fallback to basic PrintWindow
+    bPrintOk = PrintWindow(EditorHwnd, CaptureDC, 0);
+  }
+
+  if (!bPrintOk)
+  {
+    DeleteDC(CaptureDC);
+    DeleteObject(CaptureBitmap);
+    ReleaseDC(EditorHwnd, WindowDC);
+    SendStandardErrorResponse(this, Socket, RequestId, TEXT("CAPTURE_FAILED"),
+                              TEXT("PrintWindow failed"), nullptr);
+    return true;
+  }
+
+  // Extract bitmap data
+  BITMAPINFO BmpInfo;
+  ZeroMemory(&BmpInfo, sizeof(BITMAPINFO));
+  BmpInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+  BmpInfo.bmiHeader.biWidth = Width;
+  BmpInfo.bmiHeader.biHeight = -Height; // Top-down
+  BmpInfo.bmiHeader.biPlanes = 1;
+  BmpInfo.bmiHeader.biBitCount = 32;
+  BmpInfo.bmiHeader.biCompression = BI_RGB;
+
+  TArray<uint8> RawPixels;
+  RawPixels.SetNumUninitialized(Width * Height * 4);
+  GetDIBits(CaptureDC, CaptureBitmap, 0, Height, RawPixels.GetData(), &BmpInfo, DIB_RGB_COLORS);
+
+  // Clean up GDI objects
+  DeleteDC(CaptureDC);
+  DeleteObject(CaptureBitmap);
+  ReleaseDC(EditorHwnd, WindowDC);
+
+  // Convert BGRA -> RGBA (GDI uses BGRA)
+  for (int32 i = 0; i < RawPixels.Num(); i += 4)
+  {
+    uint8 Tmp = RawPixels[i];     // B
+    RawPixels[i] = RawPixels[i + 2]; // R
+    RawPixels[i + 2] = Tmp;          // B
+  }
+
+  // Compress to PNG
+  IImageWrapperModule& ImageWrapperModule = FModuleManager::LoadModuleChecked<IImageWrapperModule>(TEXT("ImageWrapper"));
+  TSharedPtr<IImageWrapper> PngWriter = ImageWrapperModule.CreateImageWrapper(EImageFormat::PNG);
+
+  if (!PngWriter.IsValid() || !PngWriter->SetRaw(RawPixels.GetData(), RawPixels.Num(), Width, Height, ERGBFormat::RGBA, 8))
+  {
+    SendStandardErrorResponse(this, Socket, RequestId, TEXT("PNG_FAILED"),
+                              TEXT("Failed to create PNG image"), nullptr);
+    return true;
+  }
+
+  const TArray64<uint8>& PngData = PngWriter->GetCompressed();
+  if (!FFileHelper::SaveArrayToFile(PngData, *FullPath))
+  {
+    SendStandardErrorResponse(this, Socket, RequestId, TEXT("SAVE_FAILED"),
+                              FString::Printf(TEXT("Failed to save screenshot to %s"), *FullPath), nullptr);
+    return true;
+  }
+
+  TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
+  Resp->SetBoolField(TEXT("success"), true);
+  Resp->SetStringField(TEXT("filename"), Filename);
+  Resp->SetStringField(TEXT("path"), FullPath);
+  Resp->SetNumberField(TEXT("width"), Width);
+  Resp->SetNumberField(TEXT("height"), Height);
+  Resp->SetStringField(TEXT("message"), TEXT("Editor window captured"));
+
+  SendAutomationResponse(Socket, RequestId, true,
+                         TEXT("Screenshot captured"), Resp, FString());
+  return true;
+#else
+  SendStandardErrorResponse(this, Socket, RequestId, TEXT("NOT_IMPLEMENTED"),
+                              TEXT("Editor window screenshot requires Windows editor build."), nullptr);
   return true;
 #endif
 }
@@ -3624,53 +4339,71 @@ bool UMcpAutomationBridgeSubsystem::HandleControlEditorSaveAll(
     const FString &RequestId, const TSharedPtr<FJsonObject> &Payload,
     TSharedPtr<FMcpBridgeWebSocket> Socket) {
 #if WITH_EDITOR
-  // Save all dirty packages using FEditorFileUtils
+  // Count dirty packages before save for reporting
   TArray<UPackage*> DirtyPackages;
   FEditorFileUtils::GetDirtyWorldPackages(DirtyPackages);
   FEditorFileUtils::GetDirtyContentPackages(DirtyPackages);
+  const int32 TotalDirty = DirtyPackages.Num();
 
-  bool bSuccess = true;
-  int32 SavedCount = 0;
-  int32 SkippedCount = 0;
-  
-  for (UPackage* Package : DirtyPackages) {
-    if (Package) {
-      FString PackagePath = Package->GetPathName();
-      
-      // Skip transient/temporary packages that cannot be saved
-      // These include /Temp/ paths and packages with RF_Transient flag
-      if (PackagePath.StartsWith(TEXT("/Temp/")) || 
-          PackagePath.StartsWith(TEXT("/Transient/")) ||
-          Package->HasAnyFlags(RF_Transient)) {
-        SkippedCount++;
-        UE_LOG(LogMcpAutomationBridgeSubsystem, Verbose,
-               TEXT("HandleControlEditorSaveAll: Skipping transient package: %s"), *PackagePath);
-        continue;
-      }
-      
-      if (UEditorAssetLibrary::SaveAsset(PackagePath, false)) {
-        SavedCount++;
-      } else {
-        bSuccess = false;
+  // Make dirty package files writable before saving to avoid the
+  // "make writable?" dialog that blocks non-interactive saves.
+  int32 MadeWritableCount = 0;
+  for (UPackage* Pkg : DirtyPackages)
+  {
+    if (!Pkg) continue;
+    FString Filename;
+    if (FPackageName::TryConvertLongPackageNameToFilename(
+            Pkg->GetName(), Filename,
+            Pkg->ContainsMap() ? FPackageName::GetMapPackageExtension()
+                               : FPackageName::GetAssetPackageExtension()))
+    {
+      IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
+      if (PlatformFile.FileExists(*Filename) && PlatformFile.IsReadOnly(*Filename))
+      {
+        PlatformFile.SetReadOnly(*Filename, false);
+        MadeWritableCount++;
+        UE_LOG(LogMcpAutomationBridgeSubsystem, Log,
+               TEXT("HandleControlEditorSaveAll: Made writable: %s"), *Filename);
       }
     }
   }
 
+  // Use FEditorFileUtils::SaveDirtyPackages — handles all package types
+  // (worlds, assets, newly created packages) correctly.
+  // Parameters: bPromptUserToSave, bSaveMapPackages, bSaveContentPackages
+  const bool bSaveResult = FEditorFileUtils::SaveDirtyPackages(
+      /*bPromptUserToSave=*/ false,
+      /*bSaveMapPackages=*/ true,
+      /*bSaveContentPackages=*/ true);
+
+  // Recount to see what's still dirty
+  TArray<UPackage*> StillDirty;
+  FEditorFileUtils::GetDirtyWorldPackages(StillDirty);
+  FEditorFileUtils::GetDirtyContentPackages(StillDirty);
+  const int32 SavedCount = TotalDirty - StillDirty.Num();
+
   TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
-  Resp->SetBoolField(TEXT("success"), bSuccess);
+  Resp->SetBoolField(TEXT("success"), bSaveResult);
   Resp->SetNumberField(TEXT("savedCount"), SavedCount);
-  Resp->SetNumberField(TEXT("skippedCount"), SkippedCount);
-  Resp->SetNumberField(TEXT("totalDirty"), DirtyPackages.Num());
-  
-  // Only report outer success if the operation actually succeeded
-  if (bSuccess || DirtyPackages.Num() == 0) {
-    SendAutomationResponse(Socket, RequestId, true, 
-                           FString::Printf(TEXT("Saved %d of %d dirty assets (skipped %d transient)"), SavedCount, DirtyPackages.Num() - SkippedCount, SkippedCount), 
+  Resp->SetNumberField(TEXT("totalDirty"), TotalDirty);
+  Resp->SetNumberField(TEXT("stillDirty"), StillDirty.Num());
+  Resp->SetNumberField(TEXT("madeWritable"), MadeWritableCount);
+
+  if (bSaveResult || StillDirty.Num() == 0) {
+    SendAutomationResponse(Socket, RequestId, true,
+                           FString::Printf(TEXT("Saved %d of %d dirty packages"), SavedCount, TotalDirty),
                            Resp, FString());
   } else {
+    // Log which packages are still dirty for debugging
+    for (UPackage* Pkg : StillDirty) {
+      if (Pkg) {
+        UE_LOG(LogMcpAutomationBridgeSubsystem, Warning,
+               TEXT("HandleControlEditorSaveAll: Still dirty after save: %s"), *Pkg->GetName());
+      }
+    }
     SendStandardErrorResponse(this, Socket, RequestId, TEXT("SAVE_FAILED"),
-                              FString::Printf(TEXT("Failed to save all assets. Saved %d of %d dirty assets."), 
-                                              SavedCount, DirtyPackages.Num() - SkippedCount), 
+                              FString::Printf(TEXT("Failed to save all assets. Saved %d of %d, %d still dirty."),
+                                              SavedCount, TotalDirty, StillDirty.Num()),
                               Resp);
   }
   return true;
@@ -3916,8 +4649,8 @@ bool UMcpAutomationBridgeSubsystem::HandleControlEditorOpenLevel(
     return true;
   }
 
-  // Normalize the level path
-  if (!LevelPath.StartsWith(TEXT("/Game/")) && !LevelPath.StartsWith(TEXT("/Engine/"))) {
+  // Normalize the level path — prepend /Game/ only for relative paths
+  if (!LevelPath.StartsWith(TEXT("/"))) {
     LevelPath = FString::Printf(TEXT("/Game/%s"), *LevelPath);
   }
 
@@ -3932,58 +4665,53 @@ bool UMcpAutomationBridgeSubsystem::HandleControlEditorOpenLevel(
     return true;
   }
 
-  // Use FEditorFileUtils to load the map
-  FString MapPath = LevelPath + TEXT(".umap");
-  
-  // CRITICAL FIX: Unreal stores levels in TWO possible path patterns:
-  // 1. Folder-based (standard): /Game/Path/LevelName/LevelName.umap
-  // 2. Flat (legacy): /Game/Path/LevelName.umap
-  // We must check BOTH paths before returning FILE_NOT_FOUND.
-  
-  // Build both possible paths
+  // Resolve the package path to a filesystem path using UE's mount point system.
+  // This correctly handles /Game/, /Engine/, and plugin mount points (e.g. /Canopy/).
+  // Check both flat and folder-based layouts:
+  //   Flat:   /Mount/Path/LevelName -> <ContentDir>/Path/LevelName.umap
+  //   Folder: /Mount/Path/LevelName -> <ContentDir>/Path/LevelName/LevelName.umap
+
+  FString FullFlatMapPath;
+  FString FullFolderMapPath;
   FString FlatMapPath = LevelPath + TEXT(".umap");
-  // Check if path is /Engine/ or /Game/ and extract accordingly
-  int32 PrefixLen = 6; // Default: "/Game/" is 6 chars
-  FString ContentDir = FPaths::ProjectContentDir();
-  if (LevelPath.StartsWith(TEXT("/Engine/"))) {
-    PrefixLen = 8; // "/Engine/" is 8 chars
-    ContentDir = FPaths::EngineContentDir();
-  }
-  FString FullFlatMapPath = ContentDir + FlatMapPath.Mid(PrefixLen);
-  FullFlatMapPath = FPaths::ConvertRelativePathToFull(FullFlatMapPath);
-  
-  // Folder-based path: /Game/Path/LevelName -> /Game/Path/LevelName/LevelName.umap
   FString LevelName = FPaths::GetBaseFilename(LevelPath);
   FString FolderMapPath = LevelPath + TEXT("/") + LevelName + TEXT(".umap");
-  FString FullFolderMapPath = ContentDir + FolderMapPath.Mid(PrefixLen);
-  FullFolderMapPath = FPaths::ConvertRelativePathToFull(FullFolderMapPath);
-  
-  // Check which path exists
+
+  // Use FPackageName to resolve through all registered mount points
+  if (!FPackageName::TryConvertLongPackageNameToFilename(FlatMapPath, FullFlatMapPath)) {
+    FullFlatMapPath.Empty();
+  } else {
+    FullFlatMapPath = FPaths::ConvertRelativePathToFull(FullFlatMapPath);
+  }
+  if (!FPackageName::TryConvertLongPackageNameToFilename(FolderMapPath, FullFolderMapPath)) {
+    FullFolderMapPath.Empty();
+  } else {
+    FullFolderMapPath = FPaths::ConvertRelativePathToFull(FullFolderMapPath);
+  }
+
   FString MapPathToLoad;
   FString FullMapPath;
-  
+
   // Prefer folder-based path (Unreal's standard) if it exists
-  if (FPaths::FileExists(FullFolderMapPath)) {
+  if (!FullFolderMapPath.IsEmpty() && FPaths::FileExists(FullFolderMapPath)) {
     MapPathToLoad = FolderMapPath;
     FullMapPath = FullFolderMapPath;
     UE_LOG(LogMcpAutomationBridgeSubsystem, Display,
            TEXT("OpenLevel: Found level at folder-based path: %s"), *FullFolderMapPath);
-  } else if (FPaths::FileExists(FullFlatMapPath)) {
-    // Fallback to flat path (legacy format)
+  } else if (!FullFlatMapPath.IsEmpty() && FPaths::FileExists(FullFlatMapPath)) {
     MapPathToLoad = FlatMapPath;
     FullMapPath = FullFlatMapPath;
     UE_LOG(LogMcpAutomationBridgeSubsystem, Display,
            TEXT("OpenLevel: Found level at flat path: %s"), *FullFlatMapPath);
   } else {
-    // Neither path exists - return detailed error
     TSharedPtr<FJsonObject> ErrorDetails = MakeShared<FJsonObject>();
     ErrorDetails->SetStringField(TEXT("levelPath"), LevelPath);
     ErrorDetails->SetStringField(TEXT("checkedFolderBased"), FullFolderMapPath);
     ErrorDetails->SetStringField(TEXT("checkedFlat"), FullFlatMapPath);
-    ErrorDetails->SetStringField(TEXT("hint"), TEXT("Unreal levels are typically stored as /Game/Path/LevelName/LevelName.umap"));
+    ErrorDetails->SetStringField(TEXT("hint"), TEXT("Unreal levels are typically stored as /Game/Path/LevelName/LevelName.umap or /PluginName/Path/LevelName.umap"));
     SendStandardErrorResponse(this, Socket, RequestId, TEXT("FILE_NOT_FOUND"),
-                              FString::Printf(TEXT("Level file not found. Checked:\n  Folder: %s\n  Flat: %s"), 
-                                            *FullFolderMapPath, *FullFlatMapPath), 
+                              FString::Printf(TEXT("Level file not found. Checked:\n  Folder: %s\n  Flat: %s"),
+                                            *FullFolderMapPath, *FullFlatMapPath),
                               ErrorDetails);
     return true;
   }
@@ -4103,6 +4831,66 @@ bool UMcpAutomationBridgeSubsystem::HandleControlActorGet(
 
   SendStandardSuccessResponse(this, Socket, RequestId, TEXT("Actor retrieved"),
                               Data);
+  return true;
+#else
+  return false;
+#endif
+}
+
+bool UMcpAutomationBridgeSubsystem::HandleControlEditorBrowseTo(
+    const FString &RequestId, const TSharedPtr<FJsonObject> &Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket) {
+#if WITH_EDITOR
+  // Extract path - can be an asset path or a folder path
+  FString Path;
+  if (!Payload->TryGetStringField(TEXT("path"), Path))
+    Payload->TryGetStringField(TEXT("assetPath"), Path);
+  if (Path.IsEmpty())
+    Payload->TryGetStringField(TEXT("directoryPath"), Path);
+
+  if (Path.IsEmpty()) {
+    SendStandardErrorResponse(this, Socket, RequestId, TEXT("INVALID_ARGUMENT"),
+                              TEXT("path, assetPath, or directoryPath required"),
+                              nullptr);
+    return true;
+  }
+
+  FContentBrowserModule &CBModule =
+      FModuleManager::LoadModuleChecked<FContentBrowserModule>("ContentBrowser");
+  IContentBrowserSingleton &CB = CBModule.Get();
+
+  // Try as asset first
+  if (UEditorAssetLibrary::DoesAssetExist(Path)) {
+    TArray<FAssetData> Assets;
+    FAssetRegistryModule &ARModule =
+        FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+    ARModule.Get().GetAssetsByPackageName(
+        *FPackageName::ObjectPathToPackageName(Path), Assets);
+
+    if (Assets.Num() > 0) {
+      CB.SyncBrowserToAssets(Assets);
+
+      TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
+      Resp->SetBoolField(TEXT("success"), true);
+      Resp->SetStringField(TEXT("path"), Path);
+      Resp->SetStringField(TEXT("type"), TEXT("asset"));
+      SendAutomationResponse(Socket, RequestId, true,
+                             TEXT("Navigated to asset"), Resp, FString());
+      return true;
+    }
+  }
+
+  // Try as folder
+  TArray<FString> Folders;
+  Folders.Add(Path);
+  CB.SyncBrowserToFolders(Folders);
+
+  TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
+  Resp->SetBoolField(TEXT("success"), true);
+  Resp->SetStringField(TEXT("path"), Path);
+  Resp->SetStringField(TEXT("type"), TEXT("folder"));
+  SendAutomationResponse(Socket, RequestId, true,
+                         TEXT("Navigated to folder"), Resp, FString());
   return true;
 #else
   return false;

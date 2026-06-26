@@ -211,7 +211,9 @@ static bool HandleCreateLevel(
 
     // Build full path
     FString FullPath = LevelPath / LevelName;
-    if (!FullPath.StartsWith(TEXT("/Game/")))
+    // Only prepend /Game/ if the path isn't already a valid mount point
+    // Plugin content paths like /Canopy/Demo/Maps should be preserved
+    if (!FPackageName::IsValidLongPackageName(FullPath, true))
     {
         FullPath = TEXT("/Game/") + FullPath;
     }

@@ -542,6 +542,15 @@ export async function handleSequenceTools(action: string, args: Record<string, u
       });
       return cleanObject(res);
     }
+    case 'render':
+    case 'render_sequence':
+    case 'movie_render': {
+      const res = await executeAutomationRequest(tools, 'render_sequence', {
+        ...args,
+        action: 'render_sequence'
+      }) as SequenceActionResponse;
+      return cleanObject(res);
+    }
     default:
       // Ensure subAction is set for compatibility with C++ handler expectations
       if (args.action && !args.subAction) {

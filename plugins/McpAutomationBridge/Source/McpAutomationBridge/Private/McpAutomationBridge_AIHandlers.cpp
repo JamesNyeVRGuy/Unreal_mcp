@@ -45,6 +45,8 @@
 #include "BehaviorTree/Decorators/BTDecorator_Cooldown.h"
 #include "BehaviorTree/Decorators/BTDecorator_Loop.h"
 #include "EnvironmentQuery/EnvQuery.h"
+#include "EnvironmentQuery/EnvQueryOption.h"
+#include "EnvironmentQuery/EnvQueryTest.h"
 #include "EnvironmentQuery/EnvQueryManager.h"
 #include "EnvironmentQuery/Generators/EnvQueryGenerator_ActorsOfClass.h"
 #include "EnvironmentQuery/Generators/EnvQueryGenerator_OnCircle.h"
@@ -84,6 +86,7 @@
 #include "StateTreeState.h"
 #include "StateTreeCompiler.h"
 #include "StateTreeCompilerLog.h"
+#include "StateTreeTaskBase.h"
 // UE 5.7+ moved StateTreeComponentSchema to GameplayStateTreeModule
 #if __has_include("Components/StateTreeComponentSchema.h")
 #include "Components/StateTreeComponentSchema.h"
@@ -193,16 +196,20 @@ static bool SanitizeAIAssetPath(const FString& InputPath, FString& OutSanitizedP
         return false;
     }
     
-    // 5. Validate path starts with known mount points
-    // Only allow /Game/ or /Engine/ as valid mount points for AI assets
-    if (!OutSanitizedPath.StartsWith(TEXT("/Game/")) && 
+    // 5. Validate path starts with a valid content mount point
+    // Allow /Game/, /Engine/, or any valid plugin mount (e.g. /Canopy/)
+    if (!OutSanitizedPath.StartsWith(TEXT("/Game/")) &&
         !OutSanitizedPath.StartsWith(TEXT("/Engine/")) &&
         OutSanitizedPath != TEXT("/Game") &&
         OutSanitizedPath != TEXT("/Engine"))
     {
-        // Could be a path traversal attempt like /etc/passwd/Test
-        OutError = FString::Printf(TEXT("Invalid path: must start with /Game/ or /Engine/ (got: %s)"), *InputPath);
-        return false;
+        // Check if this is a valid mounted content root (plugin paths, etc.)
+        FText ValidationReason;
+        if (!FPackageName::IsValidLongPackageName(OutSanitizedPath, true, &ValidationReason))
+        {
+            OutError = FString::Printf(TEXT("Invalid path: %s (got: %s)"), *ValidationReason.ToString(), *InputPath);
+            return false;
+        }
     }
     
     return true;
@@ -1076,7 +1083,61 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
 
         if (NewGenerator)
         {
-            // Add generator to query options
+            // Configure generator settings from payload
+            const TSharedPtr<FJsonObject>* GenSettings = nullptr;
+            if (Payload->TryGetObjectField(TEXT("generatorSettings"), GenSettings) && GenSettings)
+            {
+                double SearchRadius = 0;
+                if ((*GenSettings)->TryGetNumberField(TEXT("searchRadius"), SearchRadius))
+                {
+                    if (FProperty* Prop = NewGenerator->GetClass()->FindPropertyByName(TEXT("SearchRadius")))
+                    {
+                        if (FStructProperty* StructProp = CastField<FStructProperty>(Prop))
+                        {
+                            // FAIDataProviderFloatValue
+                            void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(NewGenerator);
+                            if (FProperty* DefaultProp = StructProp->Struct->FindPropertyByName(TEXT("DefaultValue")))
+                            {
+                                float Val = static_cast<float>(SearchRadius);
+                                DefaultProp->SetValue_InContainer(ValuePtr, &Val);
+                            }
+                        }
+                        else if (FFloatProperty* FloatProp = CastField<FFloatProperty>(Prop))
+                        {
+                            float Val = static_cast<float>(SearchRadius);
+                            FloatProp->SetPropertyValue_InContainer(NewGenerator, Val);
+                        }
+                    }
+                }
+
+                double GridSize = 0;
+                if ((*GenSettings)->TryGetNumberField(TEXT("gridSize"), GridSize))
+                {
+                    if (FProperty* Prop = NewGenerator->GetClass()->FindPropertyByName(TEXT("GridSize")))
+                    {
+                        if (FStructProperty* StructProp = CastField<FStructProperty>(Prop))
+                        {
+                            void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(NewGenerator);
+                            if (FProperty* DefaultProp = StructProp->Struct->FindPropertyByName(TEXT("DefaultValue")))
+                            {
+                                float Val = static_cast<float>(GridSize);
+                                DefaultProp->SetValue_InContainer(ValuePtr, &Val);
+                            }
+                        }
+                        else if (FFloatProperty* FloatProp = CastField<FFloatProperty>(Prop))
+                        {
+                            float Val = static_cast<float>(GridSize);
+                            FloatProp->SetPropertyValue_InContainer(NewGenerator, Val);
+                        }
+                    }
+                }
+            }
+
+            // Create a UEnvQueryOption to hold the generator and add to query
+            UEnvQueryOption* Option = NewObject<UEnvQueryOption>(Query);
+            Option->Generator = NewGenerator;
+            Query->GetOptionsMutable().Add(Option);
+
             Query->MarkPackageDirty();
             Result->SetStringField(TEXT("generatorType"), GeneratorType);
             Result->SetStringField(TEXT("message"), FString::Printf(TEXT("Added %s generator"), *GeneratorType));
@@ -1163,6 +1224,20 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
 
         if (NewTest)
         {
+            // Add test to the last option in the query (most recently added generator)
+            TArray<TObjectPtr<UEnvQueryOption>>& Options = Query->GetOptionsMutable();
+            if (Options.Num() > 0)
+            {
+                Options.Last()->Tests.Add(NewTest);
+            }
+            else
+            {
+                // No options yet -- create a bare option to hold the test
+                UEnvQueryOption* Option = NewObject<UEnvQueryOption>(Query);
+                Option->Tests.Add(NewTest);
+                Options.Add(Option);
+            }
+
             Query->MarkPackageDirty();
             Result->SetStringField(TEXT("testType"), TestType);
             Result->SetStringField(TEXT("message"), FString::Printf(TEXT("Added %s test"), *TestType));
@@ -1194,8 +1269,116 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
             return true;
         }
 
+        // Find the test by index across all options
+        UEnvQueryTest* TargetTest = nullptr;
+        int32 CurrentIndex = 0;
+        TArray<TObjectPtr<UEnvQueryOption>>& Options = Query->GetOptionsMutable();
+        for (const auto& Option : Options)
+        {
+            if (!Option) continue;
+            for (UEnvQueryTest* Test : Option->Tests)
+            {
+                if (CurrentIndex == TestIndex)
+                {
+                    TargetTest = Test;
+                    break;
+                }
+                ++CurrentIndex;
+            }
+            if (TargetTest) break;
+        }
+
+        if (!TargetTest)
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                                FString::Printf(TEXT("Test index %d not found (query has %d tests)"), TestIndex, CurrentIndex),
+                                TEXT("INDEX_OUT_OF_RANGE"));
+            return true;
+        }
+
+        // Read testSettings object
+        const TSharedPtr<FJsonObject>* SettingsObj = nullptr;
+        if (Payload->TryGetObjectField(TEXT("testSettings"), SettingsObj) && SettingsObj->IsValid())
+        {
+            // Filter range (FloatValueMin / FloatValueMax)
+            double FloatMin = 0;
+            if ((*SettingsObj)->TryGetNumberField(TEXT("floatMin"), FloatMin))
+            {
+                TargetTest->FloatValueMin.DefaultValue = static_cast<float>(FloatMin);
+            }
+            double FloatMax = 0;
+            if ((*SettingsObj)->TryGetNumberField(TEXT("floatMax"), FloatMax))
+            {
+                TargetTest->FloatValueMax.DefaultValue = static_cast<float>(FloatMax);
+            }
+
+            // Scoring equation
+            FString ScoringEq;
+            if ((*SettingsObj)->TryGetStringField(TEXT("scoringEquation"), ScoringEq))
+            {
+                if (ScoringEq.Equals(TEXT("Linear"), ESearchCase::IgnoreCase))
+                    TargetTest->ScoringEquation = EEnvTestScoreEquation::Linear;
+                else if (ScoringEq.Equals(TEXT("Square"), ESearchCase::IgnoreCase))
+                    TargetTest->ScoringEquation = EEnvTestScoreEquation::Square;
+                else if (ScoringEq.Equals(TEXT("InverseLinear"), ESearchCase::IgnoreCase))
+                    TargetTest->ScoringEquation = EEnvTestScoreEquation::InverseLinear;
+                else if (ScoringEq.Equals(TEXT("SquareRoot"), ESearchCase::IgnoreCase))
+                    TargetTest->ScoringEquation = EEnvTestScoreEquation::SquareRoot;
+                else if (ScoringEq.Equals(TEXT("Constant"), ESearchCase::IgnoreCase))
+                    TargetTest->ScoringEquation = EEnvTestScoreEquation::Constant;
+            }
+
+            // Filter type
+            FString FilterTypeStr;
+            if ((*SettingsObj)->TryGetStringField(TEXT("filterType"), FilterTypeStr))
+            {
+                if (FilterTypeStr.Equals(TEXT("Minimum"), ESearchCase::IgnoreCase))
+                    TargetTest->FilterType = EEnvTestFilterType::Minimum;
+                else if (FilterTypeStr.Equals(TEXT("Maximum"), ESearchCase::IgnoreCase))
+                    TargetTest->FilterType = EEnvTestFilterType::Maximum;
+                else if (FilterTypeStr.Equals(TEXT("Range"), ESearchCase::IgnoreCase))
+                    TargetTest->FilterType = EEnvTestFilterType::Range;
+                else if (FilterTypeStr.Equals(TEXT("Match"), ESearchCase::IgnoreCase))
+                    TargetTest->FilterType = EEnvTestFilterType::Match;
+            }
+
+            // Test purpose
+            FString PurposeStr;
+            if ((*SettingsObj)->TryGetStringField(TEXT("testPurpose"), PurposeStr))
+            {
+                if (PurposeStr.Equals(TEXT("Filter"), ESearchCase::IgnoreCase) || PurposeStr.Equals(TEXT("FilterOnly"), ESearchCase::IgnoreCase))
+                    TargetTest->TestPurpose = EEnvTestPurpose::Filter;
+                else if (PurposeStr.Equals(TEXT("Score"), ESearchCase::IgnoreCase) || PurposeStr.Equals(TEXT("ScoreOnly"), ESearchCase::IgnoreCase))
+                    TargetTest->TestPurpose = EEnvTestPurpose::Score;
+                else if (PurposeStr.Equals(TEXT("FilterAndScore"), ESearchCase::IgnoreCase))
+                    TargetTest->TestPurpose = EEnvTestPurpose::FilterAndScore;
+            }
+
+            // Score clamping
+            double ClampMin = 0;
+            if ((*SettingsObj)->TryGetNumberField(TEXT("clampMin"), ClampMin))
+            {
+                TargetTest->ScoreClampMin.DefaultValue = static_cast<float>(ClampMin);
+                TargetTest->ClampMinType = EEnvQueryTestClamping::SpecifiedValue;
+            }
+            double ClampMax = 0;
+            if ((*SettingsObj)->TryGetNumberField(TEXT("clampMax"), ClampMax))
+            {
+                TargetTest->ScoreClampMax.DefaultValue = static_cast<float>(ClampMax);
+                TargetTest->ClampMaxType = EEnvQueryTestClamping::SpecifiedValue;
+            }
+
+            // Scoring factor (weight)
+            double ScoringFactor = 0;
+            if ((*SettingsObj)->TryGetNumberField(TEXT("scoringFactor"), ScoringFactor))
+            {
+                TargetTest->ScoringFactor.DefaultValue = static_cast<float>(ScoringFactor);
+            }
+        }
+
         Query->MarkPackageDirty();
         Result->SetNumberField(TEXT("testIndex"), TestIndex);
+        Result->SetStringField(TEXT("testClass"), TargetTest->GetClass()->GetName());
         Result->SetStringField(TEXT("message"), TEXT("Test scoring configured"));
 
         AddAssetVerification(Result, Query);
@@ -1362,14 +1545,16 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
 #if MCP_HAS_STATE_TREE && MCP_STATE_TREE_HEADERS_AVAILABLE
         FString Name = GetStringFieldAI(Payload, TEXT("name"));
         FString Path = GetStringFieldAI(Payload, TEXT("path"), TEXT("/Game/AI/StateTrees"));
+        // schemaType: legacy ("Component"). schemaClass: explicit class name like "CanopyStateTreeSchema".
         FString SchemaType = GetStringFieldAI(Payload, TEXT("schemaType"), TEXT("Component"));
-        
+        FString SchemaClass = GetStringFieldAI(Payload, TEXT("schemaClass"), TEXT(""));
+
         if (Name.IsEmpty())
         {
             SendAutomationError(RequestingSocket, RequestId, TEXT("State Tree name is required"), TEXT("INVALID_PARAMS"));
             return true;
         }
-        
+
         // Create the package and asset
         FString FullPath = Path / Name;
         UPackage* Package = CreatePackage(*FullPath);
@@ -1379,43 +1564,88 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
                 FString::Printf(TEXT("Failed to create package: %s"), *FullPath), TEXT("CREATION_FAILED"));
             return true;
         }
-        
-        UStateTree* StateTree = NewObject<UStateTree>(Package, *Name, RF_Public | RF_Standalone);
+
+        UStateTree* StateTree = NewObject<UStateTree>(Package, *Name, RF_Public | RF_Standalone | RF_Transactional);
         if (!StateTree)
         {
-            Package->MarkAsGarbage();  // Prevent orphaned package leak
+            Package->MarkAsGarbage();
             SendAutomationError(RequestingSocket, RequestId, TEXT("Failed to create StateTree asset"), TEXT("CREATION_FAILED"));
             return true;
         }
-        
-        // Create and attach EditorData
+
         UStateTreeEditorData* EditorData = NewObject<UStateTreeEditorData>(StateTree, TEXT("EditorData"), RF_Transactional);
         if (!EditorData)
         {
-            StateTree->ConditionalBeginDestroy();  // Clean up StateTree before marking package as garbage
-            Package->MarkAsGarbage();  // Prevent orphaned package leak
+            StateTree->ConditionalBeginDestroy();
+            Package->MarkAsGarbage();
             SendAutomationError(RequestingSocket, RequestId, TEXT("Failed to create StateTree EditorData"), TEXT("CREATION_FAILED"));
             return true;
         }
         StateTree->EditorData = EditorData;
-        
-        // Assign schema based on type
+
+        // Resolve the schema UClass: explicit schemaClass first, then fall back to schemaType=Component default.
+        UClass* SchemaUClass = nullptr;
+        FString ResolvedSchemaName;
+        if (!SchemaClass.IsEmpty())
+        {
+            FString CleanName = SchemaClass;
+            if (!CleanName.StartsWith(TEXT("U")) && !CleanName.StartsWith(TEXT("/")))
+            {
+                CleanName = TEXT("U") + CleanName;
+            }
+            SchemaUClass = FindFirstObject<UClass>(*CleanName, EFindFirstObjectOptions::NativeFirst);
+            if (!SchemaUClass)
+            {
+                SchemaUClass = FindFirstObject<UClass>(*SchemaClass, EFindFirstObjectOptions::NativeFirst);
+            }
+            if (!SchemaUClass)
+            {
+                SchemaUClass = LoadObject<UClass>(nullptr, *SchemaClass);
+            }
+            if (!SchemaUClass || !SchemaUClass->IsChildOf(UStateTreeSchema::StaticClass()))
+            {
+                StateTree->ConditionalBeginDestroy();
+                Package->MarkAsGarbage();
+                SendAutomationError(RequestingSocket, RequestId,
+                    FString::Printf(TEXT("Schema class '%s' not found or not a UStateTreeSchema subclass"), *SchemaClass),
+                    TEXT("NOT_FOUND"));
+                return true;
+            }
+            ResolvedSchemaName = SchemaUClass->GetName();
+        }
+        else
+        {
 #if MCP_STATE_TREE_COMPONENT_SCHEMA_AVAILABLE
-        EditorData->Schema = NewObject<UStateTreeComponentSchema>(EditorData);
-#else
-        // UE 5.7+ or schema not available - skip schema assignment
-        // The StateTree will use a default schema or require manual configuration
+            SchemaUClass = UStateTreeComponentSchema::StaticClass();
+            ResolvedSchemaName = SchemaUClass->GetName();
 #endif
-        
-        // Add a default root state
+        }
+
+        // Instantiate the schema as an Instanced subobject of EditorData and mirror the pointer onto
+        // UStateTree::Schema so UStateTreeComponent::SetStateTree's compatibility check passes pre-compile.
+        // UStateTree::Schema is private (only FStateTreeCompiler is friend), so we write via reflection.
+        if (SchemaUClass)
+        {
+            UStateTreeSchema* SchemaInstance = NewObject<UStateTreeSchema>(EditorData, SchemaUClass, NAME_None, RF_Transactional);
+            EditorData->Schema = SchemaInstance;
+            if (FObjectProperty* RuntimeSchemaProp = FindFProperty<FObjectProperty>(UStateTree::StaticClass(), TEXT("Schema")))
+            {
+                RuntimeSchemaProp->SetObjectPropertyValue_InContainer(StateTree, SchemaInstance);
+            }
+        }
+
         UStateTreeState& RootState = EditorData->AddRootState();
         RootState.Name = FName(TEXT("Root"));
-        
-        // Save the asset
+
+        FAssetRegistryModule::AssetCreated(StateTree);
+        EditorData->MarkPackageDirty();
+        StateTree->MarkPackageDirty();
         McpSafeAssetSave(StateTree);
-        
+
         Result->SetStringField(TEXT("stateTreePath"), FullPath);
         Result->SetStringField(TEXT("rootStateName"), TEXT("Root"));
+        Result->SetStringField(TEXT("schemaClass"), ResolvedSchemaName);
+        Result->SetBoolField(TEXT("schemaInstantiated"), SchemaUClass != nullptr);
         Result->SetStringField(TEXT("message"), TEXT("State Tree created with root state"));
         AddAssetVerification(Result, StateTree);
         SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("State Tree created"), Result);
@@ -1550,14 +1780,91 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
         FString StateTreePath = GetStringFieldAI(Payload, TEXT("stateTreePath"));
         FString FromState = GetStringFieldAI(Payload, TEXT("fromState"));
         FString ToState = GetStringFieldAI(Payload, TEXT("toState"));
-        FString TriggerType = GetStringFieldAI(Payload, TEXT("triggerType"), TEXT("OnStateCompleted"));
-        
-        if (StateTreePath.IsEmpty() || FromState.IsEmpty() || ToState.IsEmpty())
+
+        // trigger (preferred), with back-compat aliases triggerType and completionType.
+        // completionType from the original schema only carried Succeeded/Failed; treat those
+        // as OnStateSucceeded / OnStateFailed.
+        FString TriggerStr;
+        if (Payload->HasField(TEXT("trigger")))
         {
-            SendAutomationError(RequestingSocket, RequestId, TEXT("stateTreePath, fromState, and toState are required"), TEXT("INVALID_PARAMS"));
+            TriggerStr = GetStringFieldAI(Payload, TEXT("trigger"));
+        }
+        else if (Payload->HasField(TEXT("triggerType")))
+        {
+            TriggerStr = GetStringFieldAI(Payload, TEXT("triggerType"));
+        }
+        else if (Payload->HasField(TEXT("completionType")))
+        {
+            const FString Completion = GetStringFieldAI(Payload, TEXT("completionType"));
+            if (Completion.Equals(TEXT("Succeeded"), ESearchCase::IgnoreCase))
+            {
+                TriggerStr = TEXT("OnStateSucceeded");
+            }
+            else if (Completion.Equals(TEXT("Failed"), ESearchCase::IgnoreCase))
+            {
+                TriggerStr = TEXT("OnStateFailed");
+            }
+            else
+            {
+                TriggerStr = Completion;
+            }
+        }
+        else
+        {
+            TriggerStr = TEXT("OnStateCompleted");
+        }
+
+        const FString TransitionTypeStr = GetStringFieldAI(Payload, TEXT("transitionType"), TEXT("GotoState"));
+        const bool bIsGotoState = TransitionTypeStr.Equals(TEXT("GotoState"), ESearchCase::IgnoreCase);
+
+        if (StateTreePath.IsEmpty() || FromState.IsEmpty())
+        {
+            SendAutomationError(RequestingSocket, RequestId, TEXT("stateTreePath and fromState are required"), TEXT("INVALID_PARAMS"));
             return true;
         }
-        
+
+        if (bIsGotoState && ToState.IsEmpty())
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                TEXT("toState is required when transitionType is GotoState"),
+                TEXT("INVALID_PARAMS"));
+            return true;
+        }
+
+        // Map transitionType string -> enum
+        EStateTreeTransitionType TransitionTypeEnum = EStateTreeTransitionType::GotoState;
+        if (bIsGotoState)
+        {
+            TransitionTypeEnum = EStateTreeTransitionType::GotoState;
+        }
+        else if (TransitionTypeStr.Equals(TEXT("Succeeded"), ESearchCase::IgnoreCase))
+        {
+            TransitionTypeEnum = EStateTreeTransitionType::Succeeded;
+        }
+        else if (TransitionTypeStr.Equals(TEXT("Failed"), ESearchCase::IgnoreCase))
+        {
+            TransitionTypeEnum = EStateTreeTransitionType::Failed;
+        }
+        else if (TransitionTypeStr.Equals(TEXT("NextState"), ESearchCase::IgnoreCase))
+        {
+            TransitionTypeEnum = EStateTreeTransitionType::NextState;
+        }
+        else if (TransitionTypeStr.Equals(TEXT("NextSelectableState"), ESearchCase::IgnoreCase))
+        {
+            TransitionTypeEnum = EStateTreeTransitionType::NextSelectableState;
+        }
+        else if (TransitionTypeStr.Equals(TEXT("None"), ESearchCase::IgnoreCase))
+        {
+            TransitionTypeEnum = EStateTreeTransitionType::None;
+        }
+        else
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("Unknown transitionType '%s'. Valid: GotoState, Succeeded, Failed, NextState, NextSelectableState, None"), *TransitionTypeStr),
+                TEXT("INVALID_PARAMS"));
+            return true;
+        }
+
         // Load the StateTree
         UStateTree* StateTree = LoadObject<UStateTree>(nullptr, *StateTreePath);
         if (!StateTree)
@@ -1566,19 +1873,18 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
                 FString::Printf(TEXT("StateTree not found: %s"), *StateTreePath), TEXT("NOT_FOUND"));
             return true;
         }
-        
+
         UStateTreeEditorData* EditorData = Cast<UStateTreeEditorData>(StateTree->EditorData);
         if (!EditorData)
         {
             SendAutomationError(RequestingSocket, RequestId, TEXT("StateTree has no EditorData"), TEXT("INVALID_STATE"));
             return true;
         }
-        
-        // Find source and target states
+
+        // Find source and (conditionally) target states
         UStateTreeState* SourceState = nullptr;
         UStateTreeState* TargetState = nullptr;
-        
-        // Helper lambda to find state recursively
+
         TFunction<UStateTreeState*(UStateTreeState*, const FString&)> FindState;
         FindState = [&FindState](UStateTreeState* State, const FString& Name) -> UStateTreeState* {
             if (!State) return nullptr;
@@ -1595,51 +1901,71 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
             }
             return nullptr;
         };
-        
+
         for (UStateTreeState* SubTree : EditorData->SubTrees)
         {
             if (!SourceState) SourceState = FindState(SubTree, FromState);
-            if (!TargetState) TargetState = FindState(SubTree, ToState);
+            if (bIsGotoState && !TargetState) TargetState = FindState(SubTree, ToState);
         }
-        
+
         if (!SourceState)
         {
             SendAutomationError(RequestingSocket, RequestId,
                 FString::Printf(TEXT("Source state '%s' not found"), *FromState), TEXT("NOT_FOUND"));
             return true;
         }
-        
-        if (!TargetState)
+
+        if (bIsGotoState && !TargetState)
         {
             SendAutomationError(RequestingSocket, RequestId,
                 FString::Printf(TEXT("Target state '%s' not found"), *ToState), TEXT("NOT_FOUND"));
             return true;
         }
-        
-        // Determine trigger type
+
+        // Map trigger string -> enum (extended: OnStateSucceeded now supported)
         EStateTreeTransitionTrigger Trigger = EStateTreeTransitionTrigger::OnStateCompleted;
-        if (TriggerType.Equals(TEXT("OnStateFailed"), ESearchCase::IgnoreCase))
+        if (TriggerStr.Equals(TEXT("OnStateSucceeded"), ESearchCase::IgnoreCase))
+        {
+            Trigger = EStateTreeTransitionTrigger::OnStateSucceeded;
+        }
+        else if (TriggerStr.Equals(TEXT("OnStateFailed"), ESearchCase::IgnoreCase))
         {
             Trigger = EStateTreeTransitionTrigger::OnStateFailed;
         }
-        else if (TriggerType.Equals(TEXT("OnTick"), ESearchCase::IgnoreCase))
+        else if (TriggerStr.Equals(TEXT("OnStateCompleted"), ESearchCase::IgnoreCase))
+        {
+            Trigger = EStateTreeTransitionTrigger::OnStateCompleted;
+        }
+        else if (TriggerStr.Equals(TEXT("OnTick"), ESearchCase::IgnoreCase))
         {
             Trigger = EStateTreeTransitionTrigger::OnTick;
         }
-        else if (TriggerType.Equals(TEXT("OnEvent"), ESearchCase::IgnoreCase))
+        else if (TriggerStr.Equals(TEXT("OnEvent"), ESearchCase::IgnoreCase))
         {
             Trigger = EStateTreeTransitionTrigger::OnEvent;
         }
-        
-        // Add transition
-        FStateTreeTransition& Transition = SourceState->AddTransition(Trigger, EStateTreeTransitionType::GotoState, TargetState);
-        
+        else
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("Unknown trigger '%s'. Valid: OnStateCompleted, OnStateSucceeded, OnStateFailed, OnTick, OnEvent"), *TriggerStr),
+                TEXT("INVALID_PARAMS"));
+            return true;
+        }
+
+        // Add transition. For non-GotoState types, TargetState is nullptr; the engine
+        // sets the state link's LinkType to the requested type with no name/id resolved.
+        FStateTreeTransition& Transition = SourceState->AddTransition(Trigger, TransitionTypeEnum, bIsGotoState ? TargetState : nullptr);
+
         // Save
         McpSafeAssetSave(StateTree);
-        
+
         Result->SetStringField(TEXT("fromState"), FromState);
-        Result->SetStringField(TEXT("toState"), ToState);
-        Result->SetStringField(TEXT("triggerType"), TriggerType);
+        if (bIsGotoState)
+        {
+            Result->SetStringField(TEXT("toState"), ToState);
+        }
+        Result->SetStringField(TEXT("trigger"), TriggerStr);
+        Result->SetStringField(TEXT("transitionType"), TransitionTypeStr);
         Result->SetStringField(TEXT("transitionId"), Transition.ID.ToString());
         Result->SetStringField(TEXT("message"), TEXT("Transition added"));
         SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Transition added"), Result);
@@ -1660,19 +1986,164 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
         return true;
     }
 
+    if (SubAction == TEXT("remove_state_tree_transition"))
+    {
+#if MCP_HAS_STATE_TREE && MCP_STATE_TREE_HEADERS_AVAILABLE
+        FString StateTreePath = GetStringFieldAI(Payload, TEXT("stateTreePath"));
+        FString FromState = GetStringFieldAI(Payload, TEXT("fromState"));
+        FString TransitionId = GetStringFieldAI(Payload, TEXT("transitionId"));
+
+        if (StateTreePath.IsEmpty() || FromState.IsEmpty())
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                TEXT("stateTreePath and fromState are required"), TEXT("INVALID_PARAMS"));
+            return true;
+        }
+
+        UStateTree* StateTree = LoadObject<UStateTree>(nullptr, *StateTreePath);
+        if (!StateTree)
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("StateTree not found: %s"), *StateTreePath), TEXT("NOT_FOUND"));
+            return true;
+        }
+
+        UStateTreeEditorData* EditorData = Cast<UStateTreeEditorData>(StateTree->EditorData);
+        if (!EditorData)
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                TEXT("StateTree has no EditorData"), TEXT("INVALID_STATE"));
+            return true;
+        }
+
+        UStateTreeState* SourceState = nullptr;
+        TFunction<UStateTreeState*(UStateTreeState*, const FString&)> FindState;
+        FindState = [&FindState](UStateTreeState* State, const FString& Name) -> UStateTreeState* {
+            if (!State) return nullptr;
+            if (State->Name.ToString().Equals(Name, ESearchCase::IgnoreCase))
+            {
+                return State;
+            }
+            for (UStateTreeState* Child : State->Children)
+            {
+                if (UStateTreeState* Found = FindState(Child, Name))
+                {
+                    return Found;
+                }
+            }
+            return nullptr;
+        };
+
+        for (UStateTreeState* SubTree : EditorData->SubTrees)
+        {
+            SourceState = FindState(SubTree, FromState);
+            if (SourceState) break;
+        }
+
+        if (!SourceState)
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("Source state '%s' not found"), *FromState), TEXT("NOT_FOUND"));
+            return true;
+        }
+
+        if (SourceState->Transitions.Num() == 0)
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("State '%s' has no transitions"), *FromState),
+                TEXT("NOT_FOUND"));
+            return true;
+        }
+
+        int32 RemoveIndex = INDEX_NONE;
+        if (!TransitionId.IsEmpty())
+        {
+            FGuid TargetGuid;
+            if (!FGuid::Parse(TransitionId, TargetGuid))
+            {
+                SendAutomationError(RequestingSocket, RequestId,
+                    FString::Printf(TEXT("Invalid transitionId GUID: %s"), *TransitionId),
+                    TEXT("INVALID_PARAMS"));
+                return true;
+            }
+            for (int32 i = 0; i < SourceState->Transitions.Num(); ++i)
+            {
+                if (SourceState->Transitions[i].ID == TargetGuid)
+                {
+                    RemoveIndex = i;
+                    break;
+                }
+            }
+            if (RemoveIndex == INDEX_NONE)
+            {
+                SendAutomationError(RequestingSocket, RequestId,
+                    FString::Printf(TEXT("Transition %s not found on state '%s'"), *TransitionId, *FromState),
+                    TEXT("NOT_FOUND"));
+                return true;
+            }
+        }
+        else if (SourceState->Transitions.Num() == 1)
+        {
+            RemoveIndex = 0;
+        }
+        else
+        {
+            // Ambiguous: list available transition IDs so the caller can disambiguate.
+            TArray<TSharedPtr<FJsonValue>> IdsArr;
+            for (const FStateTreeTransition& Trans : SourceState->Transitions)
+            {
+                IdsArr.Add(MakeShared<FJsonValueString>(Trans.ID.ToString()));
+            }
+            Result->SetArrayField(TEXT("transitionIds"), IdsArr);
+            Result->SetStringField(TEXT("fromState"), FromState);
+            Result->SetNumberField(TEXT("transitionCount"), SourceState->Transitions.Num());
+            const FString AmbigMsg = FString::Printf(TEXT("State '%s' has %d transitions; pass transitionId to disambiguate"), *FromState, SourceState->Transitions.Num());
+            Result->SetStringField(TEXT("message"), AmbigMsg);
+            SendAutomationResponse(RequestingSocket, RequestId, false, AmbigMsg, Result, TEXT("AMBIGUOUS"));
+            return true;
+        }
+
+        const FString RemovedId = SourceState->Transitions[RemoveIndex].ID.ToString();
+        SourceState->Transitions.RemoveAt(RemoveIndex);
+
+        McpSafeAssetSave(StateTree);
+
+        Result->SetStringField(TEXT("fromState"), FromState);
+        Result->SetStringField(TEXT("transitionId"), RemovedId);
+        Result->SetNumberField(TEXT("remainingTransitions"), SourceState->Transitions.Num());
+        Result->SetStringField(TEXT("message"), TEXT("Transition removed"));
+        AddAssetVerification(Result, StateTree);
+        SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Transition removed"), Result);
+#elif MCP_HAS_STATE_TREE
+        Result->SetStringField(TEXT("message"), TEXT("remove_state_tree_transition requires State Tree headers"));
+        Result->SetBoolField(TEXT("headersUnavailable"), true);
+        SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Headers unavailable"), Result);
+#else
+        SendAutomationError(RequestingSocket, RequestId,
+                            TEXT("State Trees require UE 5.3+"),
+                            TEXT("UNSUPPORTED_VERSION"));
+#endif
+        return true;
+    }
+
     if (SubAction == TEXT("configure_state_tree_task"))
     {
 #if MCP_HAS_STATE_TREE && MCP_STATE_TREE_HEADERS_AVAILABLE
         FString StateTreePath = GetStringFieldAI(Payload, TEXT("stateTreePath"));
         FString StateName = GetStringFieldAI(Payload, TEXT("stateName"));
-        FString TaskType = GetStringFieldAI(Payload, TEXT("taskType"), TEXT(""));
-        
+        FString TaskStructName = GetStringFieldAI(Payload, TEXT("taskStructName"), TEXT(""));
+        int32 TaskIndex = -1;
+        if (Payload->HasField(TEXT("taskIndex")))
+        {
+            TaskIndex = (int32)Payload->GetNumberField(TEXT("taskIndex"));
+        }
+
         if (StateTreePath.IsEmpty() || StateName.IsEmpty())
         {
             SendAutomationError(RequestingSocket, RequestId, TEXT("stateTreePath and stateName are required"), TEXT("INVALID_PARAMS"));
             return true;
         }
-        
+
         // Load the StateTree
         UStateTree* StateTree = LoadObject<UStateTree>(nullptr, *StateTreePath);
         if (!StateTree)
@@ -1681,14 +2152,14 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
                 FString::Printf(TEXT("StateTree not found: %s"), *StateTreePath), TEXT("NOT_FOUND"));
             return true;
         }
-        
+
         UStateTreeEditorData* EditorData = Cast<UStateTreeEditorData>(StateTree->EditorData);
         if (!EditorData)
         {
             SendAutomationError(RequestingSocket, RequestId, TEXT("StateTree has no EditorData"), TEXT("INVALID_STATE"));
             return true;
         }
-        
+
         // Find the state
         UStateTreeState* FoundState = nullptr;
         TFunction<UStateTreeState*(UStateTreeState*, const FString&)> FindState;
@@ -1707,21 +2178,21 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
             }
             return nullptr;
         };
-        
+
         for (UStateTreeState* SubTree : EditorData->SubTrees)
         {
             FoundState = FindState(SubTree, StateName);
             if (FoundState) break;
         }
-        
+
         if (!FoundState)
         {
             SendAutomationError(RequestingSocket, RequestId,
                 FString::Printf(TEXT("State '%s' not found"), *StateName), TEXT("NOT_FOUND"));
             return true;
         }
-        
-        // Configure state properties from payload
+
+        // Configure state-level properties (selectionBehavior)
         if (Payload->HasField(TEXT("selectionBehavior")))
         {
             FString Behavior = GetStringFieldAI(Payload, TEXT("selectionBehavior"));
@@ -1739,8 +2210,7 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
 #if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 5
                 FoundState->SelectionBehavior = EStateTreeStateSelectionBehavior::TrySelectChildrenAtRandom;
 #else
-            UE_LOG(LogMcpAIHandlers, Warning, TEXT("TrySelectChildrenAtRandom requires UE 5.5+. Using TrySelectChildrenInOrder instead."));
-
+                UE_LOG(LogMcpAIHandlers, Warning, TEXT("TrySelectChildrenAtRandom requires UE 5.5+. Using TrySelectChildrenInOrder instead."));
                 FoundState->SelectionBehavior = EStateTreeStateSelectionBehavior::TrySelectChildrenInOrder;
 #endif
             }
@@ -1759,16 +2229,175 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
             }
 #else
             // UE 5.7+: SelectionBehavior API was refactored - skip setting
-            (void)Behavior; // Suppress unused warning
+            (void)Behavior;
 #endif
-}
-        
+        }
+
+        // Find the target task within the state
+        int32 ResolvedTaskIndex = TaskIndex;
+        if (ResolvedTaskIndex < 0 && !TaskStructName.IsEmpty())
+        {
+            FString CleanName = TaskStructName;
+            if (CleanName.StartsWith(TEXT("F")))
+            {
+                CleanName = CleanName.Mid(1);
+            }
+            for (int32 i = 0; i < FoundState->Tasks.Num(); i++)
+            {
+                if (FoundState->Tasks[i].Node.IsValid())
+                {
+                    FString NodeStructName = FoundState->Tasks[i].Node.GetScriptStruct()->GetName();
+                    if (NodeStructName.Equals(CleanName, ESearchCase::IgnoreCase) ||
+                        NodeStructName.Equals(TaskStructName, ESearchCase::IgnoreCase))
+                    {
+                        ResolvedTaskIndex = i;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Helper lambda: apply JSON properties to a struct instance using ImportText
+        auto ApplyPropertiesToStruct = [](const TSharedPtr<FJsonObject>& PropsObj, UScriptStruct* Struct, uint8* StructData, TArray<FString>& OutApplied, TArray<FString>& OutFailed)
+        {
+            if (!PropsObj || !Struct || !StructData) return;
+
+            for (const auto& Pair : PropsObj->Values)
+            {
+                FProperty* Prop = Struct->FindPropertyByName(FName(*Pair.Key));
+                if (!Prop)
+                {
+                    OutFailed.Add(FString::Printf(TEXT("%s (not found)"), *Pair.Key));
+                    continue;
+                }
+
+                // Convert JSON value to text representation
+                FString TextValue;
+                if (Pair.Value->Type == EJson::String)
+                {
+                    TextValue = Pair.Value->AsString();
+                }
+                else if (Pair.Value->Type == EJson::Number)
+                {
+                    double Val = Pair.Value->AsNumber();
+                    if (Val == FMath::FloorToDouble(Val) && FMath::Abs(Val) < (double)MAX_int64)
+                    {
+                        TextValue = FString::Printf(TEXT("%lld"), (long long)Val);
+                    }
+                    else
+                    {
+                        TextValue = FString::SanitizeFloat(Val);
+                    }
+                }
+                else if (Pair.Value->Type == EJson::Boolean)
+                {
+                    TextValue = Pair.Value->AsBool() ? TEXT("True") : TEXT("False");
+                }
+
+                if (!TextValue.IsEmpty())
+                {
+                    void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(StructData);
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
+                    const TCHAR* ImportResult = Prop->ImportText_Direct(*TextValue, ValuePtr, nullptr, PPF_None);
+#else
+                    const TCHAR* ImportResult = Prop->ImportText(*TextValue, ValuePtr, PPF_None, nullptr);
+#endif
+                    if (ImportResult)
+                    {
+                        OutApplied.Add(Pair.Key);
+                    }
+                    else
+                    {
+                        OutFailed.Add(FString::Printf(TEXT("%s (import failed for '%s')"), *Pair.Key, *TextValue));
+                    }
+                }
+                else
+                {
+                    OutFailed.Add(FString::Printf(TEXT("%s (unsupported JSON type)"), *Pair.Key));
+                }
+            }
+        };
+
+        TArray<FString> AppliedProps;
+        TArray<FString> FailedProps;
+
+        // Apply taskProperties (or nodeProperties alias) to the task Node and/or Instance
+        const TSharedPtr<FJsonObject>* TaskPropsObj = nullptr;
+        if (!Payload->TryGetObjectField(TEXT("taskProperties"), TaskPropsObj) || !TaskPropsObj || !TaskPropsObj->IsValid())
+        {
+            // Accept nodeProperties and instanceProperties as aliases
+            if (!Payload->TryGetObjectField(TEXT("nodeProperties"), TaskPropsObj) || !TaskPropsObj || !TaskPropsObj->IsValid())
+            {
+                Payload->TryGetObjectField(TEXT("instanceProperties"), TaskPropsObj);
+            }
+        }
+        if (ResolvedTaskIndex >= 0 && ResolvedTaskIndex < FoundState->Tasks.Num() &&
+            TaskPropsObj && TaskPropsObj->IsValid())
+        {
+            FStateTreeEditorNode& TaskNode = FoundState->Tasks[ResolvedTaskIndex];
+
+            // Try Node first (task struct properties like Key, StateName, etc.)
+            if (TaskNode.Node.IsValid())
+            {
+                UScriptStruct* NodeStruct = const_cast<UScriptStruct*>(TaskNode.Node.GetScriptStruct());
+                uint8* NodeData = TaskNode.Node.GetMutableMemory();
+                ApplyPropertiesToStruct(*TaskPropsObj, NodeStruct, NodeData, AppliedProps, FailedProps);
+            }
+
+            // Then try Instance (instance data properties like TargetLocation, MoveSpeed, etc.)
+            if (TaskNode.Instance.IsValid())
+            {
+                UScriptStruct* InstanceStruct = const_cast<UScriptStruct*>(TaskNode.Instance.GetScriptStruct());
+                uint8* InstanceData = TaskNode.Instance.GetMutableMemory();
+
+                // Only apply properties that weren't already found on the Node
+                TSharedPtr<FJsonObject> RemainingProps = MakeShareable(new FJsonObject());
+                for (const auto& Pair : (*TaskPropsObj)->Values)
+                {
+                    if (!AppliedProps.Contains(Pair.Key))
+                    {
+                        // Remove from FailedProps if it was "not found" on Node -- it might exist on Instance
+                        FailedProps.RemoveAll([&Pair](const FString& S) { return S.StartsWith(Pair.Key + TEXT(" (not found)")); });
+                        RemainingProps->Values.Add(Pair.Key, Pair.Value);
+                    }
+                }
+                ApplyPropertiesToStruct(RemainingProps, InstanceStruct, InstanceData, AppliedProps, FailedProps);
+            }
+        }
+        else if (ResolvedTaskIndex < 0 && (Payload->HasField(TEXT("taskProperties")) || Payload->HasField(TEXT("nodeProperties")) || Payload->HasField(TEXT("instanceProperties"))))
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("Task not found (taskStructName='%s', taskIndex=%d). State has %d tasks."),
+                    *TaskStructName, TaskIndex, FoundState->Tasks.Num()),
+                TEXT("NOT_FOUND"));
+            return true;
+        }
+
         // Save
         McpSafeAssetSave(StateTree);
-        
+
         Result->SetStringField(TEXT("stateName"), StateName);
         Result->SetNumberField(TEXT("taskCount"), FoundState->Tasks.Num());
+        if (ResolvedTaskIndex >= 0)
+        {
+            Result->SetNumberField(TEXT("taskIndex"), ResolvedTaskIndex);
+        }
+
+        TSharedPtr<FJsonObject> PropsResult = MakeShareable(new FJsonObject());
+        TArray<TSharedPtr<FJsonValue>> AppliedArr, FailedArr;
+        for (const FString& S : AppliedProps)
+        {
+            AppliedArr.Add(MakeShareable(new FJsonValueString(S)));
+        }
+        for (const FString& S : FailedProps)
+        {
+            FailedArr.Add(MakeShareable(new FJsonValueString(S)));
+        }
+        Result->SetArrayField(TEXT("appliedProperties"), AppliedArr);
+        Result->SetArrayField(TEXT("failedProperties"), FailedArr);
+
         Result->SetStringField(TEXT("message"), TEXT("State task configuration updated"));
+        AddAssetVerification(Result, StateTree);
         SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Task configured"), Result);
 #elif MCP_HAS_STATE_TREE
         FString StateTreePath = GetStringFieldAI(Payload, TEXT("stateTreePath"));
@@ -1781,6 +2410,673 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
         SendAutomationError(RequestingSocket, RequestId,
                             TEXT("State Trees require UE 5.3+"),
                             TEXT("UNSUPPORTED_VERSION"));
+#endif
+        return true;
+    }
+
+    // =========================================================================
+    // 16.6b-1 State Trees - remove_state_tree_task
+    // =========================================================================
+
+    if (SubAction == TEXT("remove_state_tree_task"))
+    {
+#if MCP_HAS_STATE_TREE && MCP_STATE_TREE_HEADERS_AVAILABLE
+        FString StateTreePath = GetStringFieldAI(Payload, TEXT("stateTreePath"));
+        FString StateName = GetStringFieldAI(Payload, TEXT("stateName"));
+        FString TaskStructName = GetStringFieldAI(Payload, TEXT("taskStructName"), TEXT(""));
+        int32 TaskIndex = -1;
+        if (Payload->HasField(TEXT("taskIndex")))
+        {
+            TaskIndex = (int32)Payload->GetNumberField(TEXT("taskIndex"));
+        }
+
+        if (StateTreePath.IsEmpty() || StateName.IsEmpty())
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                TEXT("stateTreePath and stateName are required"), TEXT("INVALID_PARAMS"));
+            return true;
+        }
+        if (TaskIndex < 0 && TaskStructName.IsEmpty())
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                TEXT("Either taskIndex or taskStructName is required"), TEXT("INVALID_PARAMS"));
+            return true;
+        }
+
+        UStateTree* StateTree = LoadObject<UStateTree>(nullptr, *StateTreePath);
+        if (!StateTree)
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("StateTree not found: %s"), *StateTreePath), TEXT("NOT_FOUND"));
+            return true;
+        }
+
+        UStateTreeEditorData* EditorData = Cast<UStateTreeEditorData>(StateTree->EditorData);
+        if (!EditorData)
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                TEXT("StateTree has no EditorData"), TEXT("INVALID_STATE"));
+            return true;
+        }
+
+        // Find the state
+        UStateTreeState* FoundState = nullptr;
+        TFunction<UStateTreeState*(UStateTreeState*, const FString&)> FindState;
+        FindState = [&FindState](UStateTreeState* State, const FString& Name) -> UStateTreeState* {
+            if (!State) return nullptr;
+            if (State->Name.ToString().Equals(Name, ESearchCase::IgnoreCase))
+                return State;
+            for (UStateTreeState* Child : State->Children)
+            {
+                if (UStateTreeState* Found = FindState(Child, Name))
+                    return Found;
+            }
+            return nullptr;
+        };
+        for (UStateTreeState* SubTree : EditorData->SubTrees)
+        {
+            FoundState = FindState(SubTree, StateName);
+            if (FoundState) break;
+        }
+
+        if (!FoundState)
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("State '%s' not found"), *StateName), TEXT("NOT_FOUND"));
+            return true;
+        }
+
+        // Resolve task index by struct name if needed
+        int32 ResolvedIndex = TaskIndex;
+        if (ResolvedIndex < 0 && !TaskStructName.IsEmpty())
+        {
+            FString CleanName = TaskStructName;
+            if (CleanName.StartsWith(TEXT("F")))
+            {
+                CleanName = CleanName.Mid(1);
+            }
+            for (int32 i = 0; i < FoundState->Tasks.Num(); i++)
+            {
+                if (FoundState->Tasks[i].Node.IsValid())
+                {
+                    FString NodeStructName = FoundState->Tasks[i].Node.GetScriptStruct()->GetName();
+                    if (NodeStructName.Equals(CleanName, ESearchCase::IgnoreCase) ||
+                        NodeStructName.Equals(TaskStructName, ESearchCase::IgnoreCase))
+                    {
+                        ResolvedIndex = i;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (ResolvedIndex < 0 || ResolvedIndex >= FoundState->Tasks.Num())
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("Task not found (taskStructName='%s', taskIndex=%d). State has %d tasks."),
+                    *TaskStructName, TaskIndex, FoundState->Tasks.Num()),
+                TEXT("NOT_FOUND"));
+            return true;
+        }
+
+        // Capture info before removal
+        FString RemovedStructName;
+        if (FoundState->Tasks[ResolvedIndex].Node.IsValid())
+        {
+            RemovedStructName = FoundState->Tasks[ResolvedIndex].Node.GetScriptStruct()->GetName();
+        }
+        FGuid RemovedID = FoundState->Tasks[ResolvedIndex].ID;
+
+        // Note: bindings referencing this task will become stale.
+        // Recompile the State Tree after removal to detect issues.
+        FoundState->Tasks.RemoveAt(ResolvedIndex);
+
+        McpSafeAssetSave(StateTree);
+
+        Result->SetStringField(TEXT("stateName"), StateName);
+        Result->SetNumberField(TEXT("removedIndex"), ResolvedIndex);
+        Result->SetStringField(TEXT("removedStruct"), RemovedStructName);
+        Result->SetNumberField(TEXT("remainingTasks"), FoundState->Tasks.Num());
+        Result->SetStringField(TEXT("message"), TEXT("Task removed from state"));
+        AddAssetVerification(Result, StateTree);
+        SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Task removed"), Result);
+#elif MCP_HAS_STATE_TREE
+        Result->SetStringField(TEXT("message"), TEXT("remove_state_tree_task registered (headers unavailable)"));
+        Result->SetBoolField(TEXT("headersUnavailable"), true);
+        SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Task removal registered"), Result);
+#else
+        SendAutomationError(RequestingSocket, RequestId,
+                            TEXT("State Trees require UE 5.3+"), TEXT("UNSUPPORTED_VERSION"));
+#endif
+        return true;
+    }
+
+    // =========================================================================
+    // 16.6b State Trees - add_state_tree_task
+    // =========================================================================
+
+    if (SubAction == TEXT("add_state_tree_task"))
+    {
+#if MCP_HAS_STATE_TREE && MCP_STATE_TREE_HEADERS_AVAILABLE
+        FString StateTreePath = GetStringFieldAI(Payload, TEXT("stateTreePath"));
+        FString StateName = GetStringFieldAI(Payload, TEXT("stateName"));
+        FString TaskStructName = GetStringFieldAI(Payload, TEXT("taskStructName"));
+
+        if (StateTreePath.IsEmpty() || StateName.IsEmpty() || TaskStructName.IsEmpty())
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                TEXT("stateTreePath, stateName, and taskStructName are required"), TEXT("INVALID_PARAMS"));
+            return true;
+        }
+
+        UStateTree* StateTree = LoadObject<UStateTree>(nullptr, *StateTreePath);
+        if (!StateTree)
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("StateTree not found: %s"), *StateTreePath), TEXT("NOT_FOUND"));
+            return true;
+        }
+
+        UStateTreeEditorData* EditorData = Cast<UStateTreeEditorData>(StateTree->EditorData);
+        if (!EditorData)
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                TEXT("StateTree has no EditorData"), TEXT("INVALID_STATE"));
+            return true;
+        }
+
+        // Find the target state
+        UStateTreeState* FoundState = nullptr;
+        TFunction<UStateTreeState*(UStateTreeState*, const FString&)> FindState;
+        FindState = [&FindState](UStateTreeState* State, const FString& Name) -> UStateTreeState* {
+            if (!State) return nullptr;
+            if (State->Name.ToString().Equals(Name, ESearchCase::IgnoreCase))
+                return State;
+            for (UStateTreeState* Child : State->Children)
+            {
+                if (UStateTreeState* Found = FindState(Child, Name))
+                    return Found;
+            }
+            return nullptr;
+        };
+        for (UStateTreeState* SubTree : EditorData->SubTrees)
+        {
+            FoundState = FindState(SubTree, StateName);
+            if (FoundState) break;
+        }
+
+        if (!FoundState)
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("State '%s' not found"), *StateName), TEXT("NOT_FOUND"));
+            return true;
+        }
+
+        // Find the UScriptStruct by name
+        // Try with and without the F prefix
+        FString StructSearchName = TaskStructName;
+        UScriptStruct* TaskStruct = FindObject<UScriptStruct>(nullptr, *FString::Printf(TEXT("/Script/CanopyDemo.%s"), *StructSearchName));
+        if (!TaskStruct)
+        {
+            // Try without F prefix
+            if (StructSearchName.StartsWith(TEXT("F")))
+            {
+                FString WithoutF = StructSearchName.Mid(1);
+                TaskStruct = FindObject<UScriptStruct>(nullptr, *FString::Printf(TEXT("/Script/CanopyDemo.%s"), *WithoutF));
+            }
+        }
+        if (!TaskStruct)
+        {
+            // Try CanopyRuntime module
+            TaskStruct = FindObject<UScriptStruct>(nullptr, *FString::Printf(TEXT("/Script/CanopyRuntime.%s"), *StructSearchName));
+            if (!TaskStruct && StructSearchName.StartsWith(TEXT("F")))
+            {
+                FString WithoutF = StructSearchName.Mid(1);
+                TaskStruct = FindObject<UScriptStruct>(nullptr, *FString::Printf(TEXT("/Script/CanopyRuntime.%s"), *WithoutF));
+            }
+        }
+        if (!TaskStruct)
+        {
+            // Try StateTreeModule
+            TaskStruct = FindObject<UScriptStruct>(nullptr, *FString::Printf(TEXT("/Script/StateTreeModule.%s"), *StructSearchName));
+            if (!TaskStruct && StructSearchName.StartsWith(TEXT("F")))
+            {
+                FString WithoutF = StructSearchName.Mid(1);
+                TaskStruct = FindObject<UScriptStruct>(nullptr, *FString::Printf(TEXT("/Script/StateTreeModule.%s"), *WithoutF));
+            }
+        }
+        if (!TaskStruct)
+        {
+            // Broad search across all packages
+            TaskStruct = FindFirstObject<UScriptStruct>(*StructSearchName, EFindFirstObjectOptions::NativeFirst);
+            if (!TaskStruct && StructSearchName.StartsWith(TEXT("F")))
+            {
+                TaskStruct = FindFirstObject<UScriptStruct>(*StructSearchName.Mid(1), EFindFirstObjectOptions::NativeFirst);
+            }
+        }
+
+        if (!TaskStruct)
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("Task struct '%s' not found. Ensure the module is loaded."), *TaskStructName),
+                TEXT("NOT_FOUND"));
+            return true;
+        }
+
+        // Add task to the state
+        FStateTreeEditorNode& TaskNode = FoundState->Tasks.AddDefaulted_GetRef();
+        TaskNode.ID = FGuid::NewGuid();
+        TaskNode.Node.InitializeAs(TaskStruct);
+
+        // Initialize instance data -- required by the compiler.
+        // Create a temporary task instance to call GetInstanceDataType().
+        {
+            TArray<uint8> TempMem;
+            TempMem.SetNumZeroed(TaskStruct->GetStructureSize());
+            TaskStruct->InitializeStruct(TempMem.GetData());
+
+            const FStateTreeTaskCommonBase* TempTask =
+                reinterpret_cast<const FStateTreeTaskCommonBase*>(TempMem.GetData());
+            if (const UStruct* InstanceType = TempTask->GetInstanceDataType())
+            {
+                if (const UScriptStruct* InstanceStruct = Cast<const UScriptStruct>(InstanceType))
+                {
+                    TaskNode.Instance.InitializeAs(InstanceStruct);
+                    TaskNode.InstanceObject = nullptr;
+                }
+            }
+
+            TaskStruct->DestroyStruct(TempMem.GetData());
+        }
+
+        // Apply task properties if provided
+        const TSharedPtr<FJsonObject>* TaskPropsObj = nullptr;
+        if (Payload->TryGetObjectField(TEXT("taskProperties"), TaskPropsObj) && TaskPropsObj && TaskPropsObj->IsValid())
+        {
+            uint8* StructData = TaskNode.Node.GetMutableMemory();
+            if (StructData)
+            {
+                for (const auto& Pair : (*TaskPropsObj)->Values)
+                {
+                    FProperty* Prop = TaskStruct->FindPropertyByName(FName(*Pair.Key));
+                    if (!Prop) continue;
+
+                    if (FBoolProperty* BoolProp = CastField<FBoolProperty>(Prop))
+                    {
+                        BoolProp->SetPropertyValue_InContainer(StructData, Pair.Value->AsBool());
+                    }
+                    else if (FFloatProperty* FloatProp = CastField<FFloatProperty>(Prop))
+                    {
+                        FloatProp->SetPropertyValue_InContainer(StructData, (float)Pair.Value->AsNumber());
+                    }
+                    else if (FIntProperty* IntProp = CastField<FIntProperty>(Prop))
+                    {
+                        IntProp->SetPropertyValue_InContainer(StructData, (int32)Pair.Value->AsNumber());
+                    }
+                    else if (FNameProperty* NameProp = CastField<FNameProperty>(Prop))
+                    {
+                        NameProp->SetPropertyValue_InContainer(StructData, FName(*Pair.Value->AsString()));
+                    }
+                }
+            }
+        }
+
+        McpSafeAssetSave(StateTree);
+
+        Result->SetStringField(TEXT("stateName"), StateName);
+        Result->SetStringField(TEXT("taskStructName"), TaskStructName);
+        Result->SetStringField(TEXT("taskStructFound"), TaskStruct->GetName());
+        Result->SetNumberField(TEXT("taskCount"), FoundState->Tasks.Num());
+        Result->SetStringField(TEXT("message"), TEXT("Task added to state"));
+        AddAssetVerification(Result, StateTree);
+        SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Task added"), Result);
+#elif MCP_HAS_STATE_TREE
+        Result->SetStringField(TEXT("message"), TEXT("add_state_tree_task registered (headers unavailable)"));
+        Result->SetBoolField(TEXT("headersUnavailable"), true);
+        SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Task registered"), Result);
+#else
+        SendAutomationError(RequestingSocket, RequestId,
+                            TEXT("State Trees require UE 5.3+"), TEXT("UNSUPPORTED_VERSION"));
+#endif
+        return true;
+    }
+
+    // =========================================================================
+    // 16.6c State Trees - set_state_tree_schema
+    // =========================================================================
+
+    if (SubAction == TEXT("set_state_tree_schema"))
+    {
+#if MCP_HAS_STATE_TREE && MCP_STATE_TREE_HEADERS_AVAILABLE
+        FString StateTreePath = GetStringFieldAI(Payload, TEXT("stateTreePath"));
+        FString SchemaClass = GetStringFieldAI(Payload, TEXT("schemaClass"));
+
+        if (StateTreePath.IsEmpty() || SchemaClass.IsEmpty())
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                TEXT("stateTreePath and schemaClass are required"), TEXT("INVALID_PARAMS"));
+            return true;
+        }
+
+        UStateTree* StateTree = LoadObject<UStateTree>(nullptr, *StateTreePath);
+        if (!StateTree)
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("StateTree not found: %s"), *StateTreePath), TEXT("NOT_FOUND"));
+            return true;
+        }
+
+        UStateTreeEditorData* EditorData = Cast<UStateTreeEditorData>(StateTree->EditorData);
+        if (!EditorData)
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                TEXT("StateTree has no EditorData"), TEXT("INVALID_STATE"));
+            return true;
+        }
+
+        // Find the schema UClass: try with/without U prefix, then fall back to LoadObject for full paths.
+        FString CleanName = SchemaClass;
+        if (!CleanName.StartsWith(TEXT("U")) && !CleanName.StartsWith(TEXT("/")))
+        {
+            CleanName = TEXT("U") + CleanName;
+        }
+
+        UClass* FoundClass = FindFirstObject<UClass>(*CleanName, EFindFirstObjectOptions::NativeFirst);
+        if (!FoundClass)
+        {
+            FoundClass = FindFirstObject<UClass>(*SchemaClass, EFindFirstObjectOptions::NativeFirst);
+        }
+        if (!FoundClass)
+        {
+            FoundClass = LoadObject<UClass>(nullptr, *SchemaClass);
+        }
+        if (!FoundClass || !FoundClass->IsChildOf(UStateTreeSchema::StaticClass()))
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("Schema class '%s' not found or not a UStateTreeSchema subclass"), *SchemaClass),
+                TEXT("NOT_FOUND"));
+            return true;
+        }
+
+        // Track changes for undo and editor reactivity.
+        EditorData->Modify();
+        StateTree->Modify();
+
+        // Create the schema as an Instanced subobject of EditorData and mirror the pointer onto
+        // UStateTree::Schema. UStateTreeComponent::SetStateTree compares against UStateTree::Schema
+        // (not EditorData->Schema), so leaving the runtime field null causes the "schema not compatible"
+        // warning and a silent no-op even after compile if the user binds the tree before compiling.
+        // UStateTree::Schema is private (only FStateTreeCompiler is friend), so we write via reflection.
+        UStateTreeSchema* SchemaInstance = NewObject<UStateTreeSchema>(EditorData, FoundClass, NAME_None, RF_Transactional);
+        EditorData->Schema = SchemaInstance;
+        if (FObjectProperty* RuntimeSchemaProp = FindFProperty<FObjectProperty>(UStateTree::StaticClass(), TEXT("Schema")))
+        {
+            RuntimeSchemaProp->SetObjectPropertyValue_InContainer(StateTree, SchemaInstance);
+        }
+
+        EditorData->MarkPackageDirty();
+        StateTree->MarkPackageDirty();
+        McpSafeAssetSave(StateTree);
+
+        Result->SetStringField(TEXT("stateTreePath"), StateTreePath);
+        Result->SetStringField(TEXT("schemaClass"), FoundClass->GetName());
+        Result->SetStringField(TEXT("schemaInstanceName"), SchemaInstance->GetName());
+        Result->SetStringField(TEXT("message"), TEXT("Schema instantiated and assigned to both EditorData->Schema and StateTree->Schema"));
+        AddAssetVerification(Result, StateTree);
+        SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Schema set"), Result);
+#elif MCP_HAS_STATE_TREE
+        Result->SetStringField(TEXT("message"), TEXT("set_state_tree_schema registered (headers unavailable)"));
+        Result->SetBoolField(TEXT("headersUnavailable"), true);
+        SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Schema registered"), Result);
+#else
+        SendAutomationError(RequestingSocket, RequestId,
+                            TEXT("State Trees require UE 5.3+"), TEXT("UNSUPPORTED_VERSION"));
+#endif
+        return true;
+    }
+
+    // =========================================================================
+    // 16.6d State Trees - compile_state_tree
+    // =========================================================================
+
+    if (SubAction == TEXT("compile_state_tree"))
+    {
+#if MCP_HAS_STATE_TREE && MCP_STATE_TREE_HEADERS_AVAILABLE
+        FString StateTreePath = GetStringFieldAI(Payload, TEXT("stateTreePath"));
+
+        if (StateTreePath.IsEmpty())
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                TEXT("stateTreePath is required"), TEXT("INVALID_PARAMS"));
+            return true;
+        }
+
+        UStateTree* StateTree = LoadObject<UStateTree>(nullptr, *StateTreePath);
+        if (!StateTree)
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("StateTree not found: %s"), *StateTreePath), TEXT("NOT_FOUND"));
+            return true;
+        }
+
+        FStateTreeCompilerLog CompilerLog;
+        FStateTreeCompiler Compiler(CompilerLog);
+        const bool bSuccess = Compiler.Compile(*StateTree);
+
+        TArray<TSharedPtr<FJsonValue>> ErrorArray;
+        TArray<TSharedRef<FTokenizedMessage>> Msgs = CompilerLog.ToTokenizedMessages();
+        for (const auto& Msg : Msgs)
+        {
+            ErrorArray.Add(MakeShareable(new FJsonValueString(Msg->ToText().ToString())));
+        }
+
+        if (bSuccess)
+        {
+            McpSafeAssetSave(StateTree);
+        }
+
+        Result->SetStringField(TEXT("stateTreePath"), StateTreePath);
+        Result->SetBoolField(TEXT("compiled"), bSuccess);
+        Result->SetArrayField(TEXT("messages"), ErrorArray);
+        Result->SetStringField(TEXT("message"), bSuccess ? TEXT("StateTree compiled successfully") : TEXT("StateTree compilation failed"));
+        AddAssetVerification(Result, StateTree);
+        SendAutomationResponse(RequestingSocket, RequestId, bSuccess,
+            bSuccess ? TEXT("Compiled") : TEXT("Compilation failed"), Result);
+#elif MCP_HAS_STATE_TREE
+        Result->SetStringField(TEXT("message"), TEXT("compile_state_tree registered (headers unavailable)"));
+        Result->SetBoolField(TEXT("headersUnavailable"), true);
+        SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Compile registered"), Result);
+#else
+        SendAutomationError(RequestingSocket, RequestId,
+                            TEXT("State Trees require UE 5.3+"), TEXT("UNSUPPORTED_VERSION"));
+#endif
+        return true;
+    }
+
+    // =========================================================================
+    // 16.6e State Trees - add_state_tree_binding
+    // =========================================================================
+
+    if (SubAction == TEXT("add_state_tree_binding"))
+    {
+#if MCP_HAS_STATE_TREE && MCP_STATE_TREE_HEADERS_AVAILABLE
+        FString StateTreePath = GetStringFieldAI(Payload, TEXT("stateTreePath"));
+        FString StateName = GetStringFieldAI(Payload, TEXT("stateName"));
+        int32 SourceTaskIndex = -1;
+        int32 TargetTaskIndex = -1;
+        FString SourceTaskStruct = GetStringFieldAI(Payload, TEXT("sourceTaskStruct"), TEXT(""));
+        FString TargetTaskStruct = GetStringFieldAI(Payload, TEXT("targetTaskStruct"), TEXT(""));
+        FString SourcePropertyPath = GetStringFieldAI(Payload, TEXT("sourcePropertyPath"));
+        FString TargetPropertyPath = GetStringFieldAI(Payload, TEXT("targetPropertyPath"));
+
+        if (Payload->HasField(TEXT("sourceTaskIndex")))
+        {
+            SourceTaskIndex = (int32)Payload->GetNumberField(TEXT("sourceTaskIndex"));
+        }
+        if (Payload->HasField(TEXT("targetTaskIndex")))
+        {
+            TargetTaskIndex = (int32)Payload->GetNumberField(TEXT("targetTaskIndex"));
+        }
+
+        if (StateTreePath.IsEmpty() || StateName.IsEmpty() ||
+            SourcePropertyPath.IsEmpty() || TargetPropertyPath.IsEmpty())
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                TEXT("stateTreePath, stateName, sourcePropertyPath, and targetPropertyPath are required"),
+                TEXT("INVALID_PARAMS"));
+            return true;
+        }
+
+        // Must have either index or struct name for both source and target
+        if (SourceTaskIndex < 0 && SourceTaskStruct.IsEmpty())
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                TEXT("Either sourceTaskIndex or sourceTaskStruct is required"), TEXT("INVALID_PARAMS"));
+            return true;
+        }
+        if (TargetTaskIndex < 0 && TargetTaskStruct.IsEmpty())
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                TEXT("Either targetTaskIndex or targetTaskStruct is required"), TEXT("INVALID_PARAMS"));
+            return true;
+        }
+
+        UStateTree* StateTree = LoadObject<UStateTree>(nullptr, *StateTreePath);
+        if (!StateTree)
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("StateTree not found: %s"), *StateTreePath), TEXT("NOT_FOUND"));
+            return true;
+        }
+
+        UStateTreeEditorData* EditorData = Cast<UStateTreeEditorData>(StateTree->EditorData);
+        if (!EditorData)
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                TEXT("StateTree has no EditorData"), TEXT("INVALID_STATE"));
+            return true;
+        }
+
+        // Find the state
+        UStateTreeState* FoundState = nullptr;
+        TFunction<UStateTreeState*(UStateTreeState*, const FString&)> FindState;
+        FindState = [&FindState](UStateTreeState* State, const FString& Name) -> UStateTreeState* {
+            if (!State) return nullptr;
+            if (State->Name.ToString().Equals(Name, ESearchCase::IgnoreCase))
+                return State;
+            for (UStateTreeState* Child : State->Children)
+            {
+                if (UStateTreeState* Found = FindState(Child, Name))
+                    return Found;
+            }
+            return nullptr;
+        };
+        for (UStateTreeState* SubTree : EditorData->SubTrees)
+        {
+            FoundState = FindState(SubTree, StateName);
+            if (FoundState) break;
+        }
+
+        if (!FoundState)
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("State '%s' not found"), *StateName), TEXT("NOT_FOUND"));
+            return true;
+        }
+
+        // Helper: find task index by struct name
+        auto FindTaskByStruct = [&](const FString& StructName) -> int32
+        {
+            FString CleanName = StructName;
+            if (CleanName.StartsWith(TEXT("F")))
+            {
+                CleanName = CleanName.Mid(1);
+            }
+            for (int32 i = 0; i < FoundState->Tasks.Num(); i++)
+            {
+                if (FoundState->Tasks[i].Node.IsValid())
+                {
+                    FString NodeStructName = FoundState->Tasks[i].Node.GetScriptStruct()->GetName();
+                    if (NodeStructName.Equals(CleanName, ESearchCase::IgnoreCase) ||
+                        NodeStructName.Equals(StructName, ESearchCase::IgnoreCase))
+                    {
+                        return i;
+                    }
+                }
+            }
+            return -1;
+        };
+
+        // Resolve source task index
+        if (SourceTaskIndex < 0)
+        {
+            SourceTaskIndex = FindTaskByStruct(SourceTaskStruct);
+        }
+        if (TargetTaskIndex < 0)
+        {
+            TargetTaskIndex = FindTaskByStruct(TargetTaskStruct);
+        }
+
+        if (SourceTaskIndex < 0 || SourceTaskIndex >= FoundState->Tasks.Num())
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("Source task not found (index=%d, struct='%s')"),
+                    SourceTaskIndex, *SourceTaskStruct), TEXT("NOT_FOUND"));
+            return true;
+        }
+        if (TargetTaskIndex < 0 || TargetTaskIndex >= FoundState->Tasks.Num())
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("Target task not found (index=%d, struct='%s')"),
+                    TargetTaskIndex, *TargetTaskStruct), TEXT("NOT_FOUND"));
+            return true;
+        }
+
+        FStateTreeEditorNode& SourceNode = FoundState->Tasks[SourceTaskIndex];
+        FStateTreeEditorNode& TargetNode = FoundState->Tasks[TargetTaskIndex];
+
+        // Create property binding paths
+        // Source path references the source task's instance data
+        // Target path references the target task's instance data
+        FPropertyBindingPath SourcePath;
+        FPropertyBindingPath TargetPath;
+        SourcePath.SetStructID(SourceNode.ID);
+        TargetPath.SetStructID(TargetNode.ID);
+
+        if (!SourcePath.FromString(*SourcePropertyPath))
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("Failed to parse source property path: %s"), *SourcePropertyPath),
+                TEXT("INVALID_PARAMS"));
+            return true;
+        }
+        if (!TargetPath.FromString(*TargetPropertyPath))
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("Failed to parse target property path: %s"), *TargetPropertyPath),
+                TEXT("INVALID_PARAMS"));
+            return true;
+        }
+
+        EditorData->EditorBindings.AddBinding(SourcePath, TargetPath);
+
+        McpSafeAssetSave(StateTree);
+
+        Result->SetStringField(TEXT("stateName"), StateName);
+        Result->SetNumberField(TEXT("sourceTaskIndex"), SourceTaskIndex);
+        Result->SetNumberField(TEXT("targetTaskIndex"), TargetTaskIndex);
+        Result->SetStringField(TEXT("sourcePropertyPath"), SourcePropertyPath);
+        Result->SetStringField(TEXT("targetPropertyPath"), TargetPropertyPath);
+        Result->SetStringField(TEXT("message"), TEXT("Property binding added"));
+        AddAssetVerification(Result, StateTree);
+        SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Binding added"), Result);
+#elif MCP_HAS_STATE_TREE
+        Result->SetStringField(TEXT("message"), TEXT("add_state_tree_binding registered (headers unavailable)"));
+        Result->SetBoolField(TEXT("headersUnavailable"), true);
+        SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Binding registered"), Result);
+#else
+        SendAutomationError(RequestingSocket, RequestId,
+                            TEXT("State Trees require UE 5.3+"), TEXT("UNSUPPORTED_VERSION"));
 #endif
         return true;
     }
@@ -2322,6 +3618,247 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
 
         Result->SetObjectField(TEXT("aiInfo"), AIInfo);
         SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("AI info retrieved"), Result);
+        return true;
+    }
+
+    // =========================================================================
+    // State Tree Inspection
+    // =========================================================================
+
+    if (SubAction == TEXT("get_state_tree_info"))
+    {
+#if MCP_HAS_STATE_TREE && MCP_STATE_TREE_HEADERS_AVAILABLE
+        FString StateTreePath = GetStringFieldAI(Payload, TEXT("stateTreePath"));
+        if (StateTreePath.IsEmpty())
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                TEXT("stateTreePath is required"), TEXT("INVALID_PARAMS"));
+            return true;
+        }
+
+        UStateTree* StateTree = LoadObject<UStateTree>(nullptr, *StateTreePath);
+        if (!StateTree)
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("StateTree not found: %s"), *StateTreePath),
+                TEXT("NOT_FOUND"));
+            return true;
+        }
+
+        UStateTreeEditorData* EditorData = Cast<UStateTreeEditorData>(StateTree->EditorData);
+        if (!EditorData)
+        {
+            SendAutomationError(RequestingSocket, RequestId,
+                TEXT("StateTree has no EditorData"), TEXT("INVALID_STATE"));
+            return true;
+        }
+
+        // Schema info
+        FString SchemaName = TEXT("None");
+        if (EditorData->Schema)
+        {
+            SchemaName = EditorData->Schema->GetClass()->GetName();
+        }
+
+        // Recursive state serializer
+        TFunction<TSharedPtr<FJsonObject>(UStateTreeState*)> SerializeState;
+        SerializeState = [&SerializeState](UStateTreeState* State) -> TSharedPtr<FJsonObject>
+        {
+            TSharedPtr<FJsonObject> StateObj = MakeShared<FJsonObject>();
+            if (!State) return StateObj;
+
+            StateObj->SetStringField(TEXT("name"), State->Name.ToString());
+            StateObj->SetStringField(TEXT("id"), State->ID.ToString());
+
+            // State type
+            FString TypeStr;
+            switch (State->Type)
+            {
+            case EStateTreeStateType::State:       TypeStr = TEXT("State"); break;
+            case EStateTreeStateType::Group:        TypeStr = TEXT("Group"); break;
+            case EStateTreeStateType::Linked:       TypeStr = TEXT("Linked"); break;
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 4
+            case EStateTreeStateType::LinkedAsset:  TypeStr = TEXT("LinkedAsset"); break;
+#endif
+            default:                                TypeStr = TEXT("Unknown"); break;
+            }
+            StateObj->SetStringField(TEXT("type"), TypeStr);
+
+            // Selection behavior
+            FString SelectionStr;
+            switch (State->SelectionBehavior)
+            {
+            case EStateTreeStateSelectionBehavior::None:                     SelectionStr = TEXT("None"); break;
+            case EStateTreeStateSelectionBehavior::TryEnterState:            SelectionStr = TEXT("TryEnterState"); break;
+            case EStateTreeStateSelectionBehavior::TrySelectChildrenInOrder: SelectionStr = TEXT("TrySelectChildrenInOrder"); break;
+            default:                                                         SelectionStr = TEXT("Other"); break;
+            }
+            StateObj->SetStringField(TEXT("selectionBehavior"), SelectionStr);
+            StateObj->SetBoolField(TEXT("enabled"), State->bEnabled);
+
+            // Tasks
+            TArray<TSharedPtr<FJsonValue>> TasksArr;
+            for (const FStateTreeEditorNode& TaskNode : State->Tasks)
+            {
+                TSharedPtr<FJsonObject> TaskObj = MakeShared<FJsonObject>();
+                TaskObj->SetStringField(TEXT("id"), TaskNode.ID.ToString());
+
+                // Task struct name
+                if (TaskNode.Node.IsValid())
+                {
+                    const UScriptStruct* TaskStruct = TaskNode.Node.GetScriptStruct();
+                    TaskObj->SetStringField(TEXT("structName"),
+                        TaskStruct ? FString::Printf(TEXT("F%s"), *TaskStruct->GetName()) : TEXT("Unknown"));
+
+                    // Dump UPROPERTY values from the task struct
+                    const uint8* StructData = TaskNode.Node.GetMemory();
+                    if (TaskStruct && StructData)
+                    {
+                        TSharedPtr<FJsonObject> PropsObj = MakeShared<FJsonObject>();
+                        for (TFieldIterator<FProperty> PropIt(TaskStruct, EFieldIteratorFlags::IncludeSuper); PropIt; ++PropIt)
+                        {
+                            FProperty* Prop = *PropIt;
+                            if (!Prop || !Prop->HasAnyPropertyFlags(CPF_Edit | CPF_BlueprintVisible))
+                                continue;
+
+                            FString ValueStr;
+                            Prop->ExportTextItem_Direct(ValueStr, Prop->ContainerPtrToValuePtr<void>(StructData),
+                                nullptr, nullptr, PPF_None);
+                            PropsObj->SetStringField(Prop->GetName(), ValueStr);
+                        }
+                        TaskObj->SetObjectField(TEXT("properties"), PropsObj);
+                    }
+                }
+                else
+                {
+                    TaskObj->SetStringField(TEXT("structName"), TEXT("Invalid"));
+                }
+
+                // Instance data struct name
+                if (TaskNode.Instance.IsValid())
+                {
+                    const UScriptStruct* InstanceStruct = TaskNode.Instance.GetScriptStruct();
+                    TaskObj->SetStringField(TEXT("instanceDataStruct"),
+                        InstanceStruct ? FString::Printf(TEXT("F%s"), *InstanceStruct->GetName()) : TEXT("None"));
+                }
+
+                TasksArr.Add(MakeShared<FJsonValueObject>(TaskObj));
+            }
+            StateObj->SetArrayField(TEXT("tasks"), TasksArr);
+
+            // Enter conditions
+            TArray<TSharedPtr<FJsonValue>> EnterConditionsArr;
+            for (const FStateTreeEditorNode& CondNode : State->EnterConditions)
+            {
+                TSharedPtr<FJsonObject> CondObj = MakeShared<FJsonObject>();
+                CondObj->SetStringField(TEXT("id"), CondNode.ID.ToString());
+                if (CondNode.Node.IsValid())
+                {
+                    const UScriptStruct* CondStruct = CondNode.Node.GetScriptStruct();
+                    CondObj->SetStringField(TEXT("structName"),
+                        CondStruct ? FString::Printf(TEXT("F%s"), *CondStruct->GetName()) : TEXT("Unknown"));
+                }
+                EnterConditionsArr.Add(MakeShared<FJsonValueObject>(CondObj));
+            }
+            StateObj->SetArrayField(TEXT("enterConditions"), EnterConditionsArr);
+
+            // Transitions
+            TArray<TSharedPtr<FJsonValue>> TransitionsArr;
+            for (const FStateTreeTransition& Trans : State->Transitions)
+            {
+                TSharedPtr<FJsonObject> TransObj = MakeShared<FJsonObject>();
+                const FString TransIdStr = Trans.ID.ToString();
+                TransObj->SetStringField(TEXT("id"), TransIdStr);
+                TransObj->SetStringField(TEXT("transitionId"), TransIdStr);
+
+                // Trigger is a bitmask in UE 5.6
+                const uint8 TriggerVal = static_cast<uint8>(Trans.Trigger);
+                FString TriggerStr;
+                if (TriggerVal == static_cast<uint8>(EStateTreeTransitionTrigger::OnStateCompleted))
+                    TriggerStr = TEXT("OnStateCompleted");
+                else if (TriggerVal == static_cast<uint8>(EStateTreeTransitionTrigger::OnStateSucceeded))
+                    TriggerStr = TEXT("OnStateSucceeded");
+                else if (TriggerVal == static_cast<uint8>(EStateTreeTransitionTrigger::OnStateFailed))
+                    TriggerStr = TEXT("OnStateFailed");
+                else if (TriggerVal == static_cast<uint8>(EStateTreeTransitionTrigger::OnTick))
+                    TriggerStr = TEXT("OnTick");
+                else if (TriggerVal == static_cast<uint8>(EStateTreeTransitionTrigger::OnEvent))
+                    TriggerStr = TEXT("OnEvent");
+                else
+                    TriggerStr = FString::Printf(TEXT("Flags:0x%02X"), TriggerVal);
+                TransObj->SetStringField(TEXT("trigger"), TriggerStr);
+
+#if WITH_EDITORONLY_DATA
+                FString TransTypeStr;
+                switch (Trans.State.LinkType)
+                {
+                case EStateTreeTransitionType::GotoState:            TransTypeStr = TEXT("GotoState"); break;
+                case EStateTreeTransitionType::Succeeded:             TransTypeStr = TEXT("Succeeded"); break;
+                case EStateTreeTransitionType::Failed:                TransTypeStr = TEXT("Failed"); break;
+                case EStateTreeTransitionType::NextState:             TransTypeStr = TEXT("NextState"); break;
+                case EStateTreeTransitionType::NextSelectableState:   TransTypeStr = TEXT("NextSelectableState"); break;
+                case EStateTreeTransitionType::None:                  TransTypeStr = TEXT("None"); break;
+                default:                                              TransTypeStr = TEXT("Unknown"); break;
+                }
+                TransObj->SetStringField(TEXT("transitionType"), TransTypeStr);
+
+                // Target state always present in output; empty for non-GotoState types.
+                if (Trans.State.LinkType == EStateTreeTransitionType::GotoState)
+                {
+                    TransObj->SetStringField(TEXT("targetStateName"), Trans.State.Name.ToString());
+                    TransObj->SetStringField(TEXT("targetStateId"), Trans.State.ID.ToString());
+                }
+                else
+                {
+                    TransObj->SetStringField(TEXT("targetStateName"), TEXT(""));
+                    TransObj->SetStringField(TEXT("targetStateId"), TEXT(""));
+                }
+#endif
+
+                TransitionsArr.Add(MakeShared<FJsonValueObject>(TransObj));
+            }
+            StateObj->SetArrayField(TEXT("transitions"), TransitionsArr);
+
+            // Child states (recursive)
+            TArray<TSharedPtr<FJsonValue>> ChildrenArr;
+            for (UStateTreeState* Child : State->Children)
+            {
+                if (Child)
+                {
+                    ChildrenArr.Add(MakeShared<FJsonValueObject>(SerializeState(Child)));
+                }
+            }
+            StateObj->SetArrayField(TEXT("children"), ChildrenArr);
+
+            return StateObj;
+        };
+
+        // Build response
+        TArray<TSharedPtr<FJsonValue>> StatesArr;
+        for (UStateTreeState* SubTree : EditorData->SubTrees)
+        {
+            if (SubTree)
+            {
+                StatesArr.Add(MakeShared<FJsonValueObject>(SerializeState(SubTree)));
+            }
+        }
+
+        Result->SetStringField(TEXT("stateTreePath"), StateTreePath);
+        Result->SetStringField(TEXT("stateTreeName"), StateTree->GetName());
+        Result->SetStringField(TEXT("schema"), SchemaName);
+        Result->SetArrayField(TEXT("states"), StatesArr);
+        Result->SetStringField(TEXT("message"), TEXT("State Tree info retrieved"));
+        AddAssetVerification(Result, StateTree);
+        SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("State Tree info retrieved"), Result);
+#elif MCP_HAS_STATE_TREE
+        Result->SetStringField(TEXT("message"), TEXT("get_state_tree_info requires State Tree headers"));
+        Result->SetBoolField(TEXT("headersUnavailable"), true);
+        SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Headers unavailable"), Result);
+#else
+        SendAutomationError(RequestingSocket, RequestId,
+                            TEXT("State Trees require UE 5.3+"),
+                            TEXT("UNSUPPORTED_VERSION"));
+#endif
         return true;
     }
 

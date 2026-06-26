@@ -524,3 +524,107 @@ bool UMcpAutomationBridgeSubsystem::HandleAddTransformTrack(
     return true;
 #endif
 }
+
+bool UMcpAutomationBridgeSubsystem::HandleRenderSequence(
+    const FString& RequestId,
+    const FString& Action,
+    const TSharedPtr<FJsonObject>& Payload,
+    TSharedPtr<FMcpBridgeWebSocket> RequestingSocket)
+{
+#if WITH_EDITOR
+    FString SequencePath;
+    Payload->TryGetStringField(TEXT("sequencePath"), SequencePath);
+    if (SequencePath.IsEmpty())
+        Payload->TryGetStringField(TEXT("assetPath"), SequencePath);
+
+    FString OutputDir;
+    Payload->TryGetStringField(TEXT("outputDirectory"), OutputDir);
+    if (OutputDir.IsEmpty())
+        Payload->TryGetStringField(TEXT("outputPath"), OutputDir);
+    if (OutputDir.IsEmpty())
+        OutputDir = FPaths::ProjectSavedDir() / TEXT("MovieRenders");
+
+    FString Format;
+    Payload->TryGetStringField(TEXT("format"), Format);
+    if (Format.IsEmpty())
+        Format = TEXT("png");
+
+    int32 ResX = 1920, ResY = 1080;
+    if (Payload->HasField(TEXT("resolutionX")))
+        ResX = static_cast<int32>(Payload->GetNumberField(TEXT("resolutionX")));
+    if (Payload->HasField(TEXT("resolutionY")))
+        ResY = static_cast<int32>(Payload->GetNumberField(TEXT("resolutionY")));
+
+    // Use the Movie Render Queue if the module is available
+    IModuleInterface* MRQModule = FModuleManager::Get().GetModule(TEXT("MovieRenderPipelineCore"));
+    if (MRQModule)
+    {
+        // Use console command to trigger rendering via Movie Render Queue
+        // This is the most portable approach across UE versions
+        FString Cmd = FString::Printf(
+            TEXT("MoviePipeline.RenderSequence \"%s\" -OutputDirectory=\"%s\" -ResX=%d -ResY=%d"),
+            *SequencePath, *OutputDir, ResX, ResY);
+
+        if (GEditor && GEditor->GetEditorWorldContext().World())
+        {
+            GEditor->GetEditorWorldContext().World()->Exec(GEditor->GetEditorWorldContext().World(), *Cmd);
+        }
+
+        TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+        Result->SetStringField(TEXT("sequencePath"), SequencePath);
+        Result->SetStringField(TEXT("outputDirectory"), OutputDir);
+        Result->SetStringField(TEXT("format"), Format);
+        Result->SetNumberField(TEXT("resolutionX"), ResX);
+        Result->SetNumberField(TEXT("resolutionY"), ResY);
+        Result->SetBoolField(TEXT("renderStarted"), true);
+        Result->SetStringField(TEXT("method"), TEXT("MovieRenderQueue"));
+        SendAutomationResponse(RequestingSocket, RequestId, true,
+                               TEXT("Movie render started via MovieRenderQueue"), Result);
+        return true;
+    }
+
+    // Fallback: use Sequencer's built-in render-to-movie
+    if (SequencePath.IsEmpty())
+    {
+        SendAutomationError(RequestingSocket, RequestId,
+                            TEXT("sequencePath is required"), TEXT("INVALID_ARGUMENT"));
+        return true;
+    }
+
+    // Load the level sequence to validate it exists
+    UObject* SequenceObj = StaticLoadObject(ULevelSequence::StaticClass(), nullptr, *SequencePath);
+    if (!SequenceObj)
+    {
+        SendAutomationError(RequestingSocket, RequestId,
+                            FString::Printf(TEXT("Level sequence not found: %s"), *SequencePath),
+                            TEXT("ASSET_NOT_FOUND"));
+        return true;
+    }
+
+    // Use console command for built-in render
+    FString RenderCmd = FString::Printf(
+        TEXT("HighResShot %dx%d OutputDirectory=\"%s\""),
+        ResX, ResY, *OutputDir);
+
+    if (GEditor && GEditor->GetEditorWorldContext().World())
+    {
+        GEditor->GetEditorWorldContext().World()->Exec(GEditor->GetEditorWorldContext().World(), *RenderCmd);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("sequencePath"), SequencePath);
+    Result->SetStringField(TEXT("outputDirectory"), OutputDir);
+    Result->SetStringField(TEXT("format"), Format);
+    Result->SetNumberField(TEXT("resolutionX"), ResX);
+    Result->SetNumberField(TEXT("resolutionY"), ResY);
+    Result->SetBoolField(TEXT("renderStarted"), true);
+    Result->SetStringField(TEXT("method"), TEXT("HighResShot"));
+    SendAutomationResponse(RequestingSocket, RequestId, true,
+                           TEXT("Render started via HighResShot fallback"), Result);
+    return true;
+#else
+    SendAutomationResponse(RequestingSocket, RequestId, false,
+                           TEXT("render_sequence requires editor build"), nullptr, TEXT("NOT_IMPLEMENTED"));
+    return true;
+#endif
+}

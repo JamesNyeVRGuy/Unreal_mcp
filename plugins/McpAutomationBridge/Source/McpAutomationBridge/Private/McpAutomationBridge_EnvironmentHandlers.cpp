@@ -31,6 +31,7 @@
 #include "Developer/AssetTools/Public/AssetToolsModule.h"
 #include "EditorValidatorSubsystem.h"
 #include "Engine/Blueprint.h"
+#include "Engine/DataAsset.h"
 #include "Engine/DirectionalLight.h"
 #include "Engine/SkyLight.h"
 #include "EngineUtils.h"
@@ -48,6 +49,8 @@
 #include "LandscapeLayerInfoObject.h"
 #include "LandscapeGrassType.h"
 #include "AssetRegistry/AssetRegistryModule.h"
+#include "JsonObjectConverter.h"
+#include "Kismet2/BlueprintEditorUtils.h"
 
 #endif
 
@@ -988,6 +991,196 @@ bool UMcpAutomationBridgeSubsystem::HandleCreateProceduralTerrain(
 #endif
 }
 
+namespace {
+
+// Write a JSON value into the memory of a single FProperty instance. Handles the
+// common types that appear as TMap keys/values: structs (FGameplayTag via "Tag.Name"
+// string OR full JSON object), class references (TSubclassOf accepts paths with or
+// without "_C" suffix, and Blueprint asset paths get resolved to their generated
+// class), object references, soft refs, names, strings, bools, numerics. Returns
+// false and writes a description to OutError on failure.
+static bool WriteJsonToPropertyMemory(FProperty *Prop, void *RawMem,
+                                      const TSharedPtr<FJsonValue> &Value,
+                                      FString &OutError) {
+  if (!Prop || !RawMem || !Value.IsValid()) {
+    OutError = TEXT("Invalid property/memory/value");
+    return false;
+  }
+
+  if (FStructProperty *SP = CastField<FStructProperty>(Prop)) {
+    if (!SP->Struct) {
+      OutError = TEXT("Struct property has no struct type");
+      return false;
+    }
+    if (Value->Type == EJson::Object) {
+      const TSharedPtr<FJsonObject> &Obj = Value->AsObject();
+      if (Obj.IsValid() && FJsonObjectConverter::JsonObjectToUStruct(
+                              Obj.ToSharedRef(), SP->Struct, RawMem, 0, 0)) {
+        return true;
+      }
+      OutError = FString::Printf(TEXT("Failed to convert JSON object to %s"),
+                                 *SP->Struct->GetName());
+      return false;
+    }
+    if (Value->Type == EJson::String) {
+      const FString StrVal = Value->AsString();
+      // Fast path for FGameplayTag: write the TagName field directly.
+      if (SP->Struct->GetFName() == TEXT("GameplayTag")) {
+        if (FNameProperty *NP = CastField<FNameProperty>(
+                SP->Struct->FindPropertyByName(TEXT("TagName")))) {
+          NP->SetPropertyValue_InContainer(RawMem, FName(*StrVal));
+          return true;
+        }
+      }
+      FString Wrapped = StrVal;
+      if (!Wrapped.StartsWith(TEXT("(")))
+        Wrapped = TEXT("(") + Wrapped + TEXT(")");
+      const TCHAR *Buf = *Wrapped;
+      if (SP->Struct->ImportText(Buf, RawMem, nullptr, PPF_None, GLog,
+                                 SP->Struct->GetName())) {
+        return true;
+      }
+      OutError = FString::Printf(TEXT("Failed to import string into %s"),
+                                 *SP->Struct->GetName());
+      return false;
+    }
+    OutError = TEXT("Expected string or object for struct property");
+    return false;
+  }
+
+  if (FClassProperty *CP = CastField<FClassProperty>(Prop)) {
+    if (Value->Type != EJson::String) {
+      OutError = TEXT("Expected string class path for class property");
+      return false;
+    }
+    const FString Path = Value->AsString();
+    if (Path.IsEmpty()) {
+      CP->SetObjectPropertyValue(RawMem, nullptr);
+      return true;
+    }
+    UClass *Loaded = LoadObject<UClass>(nullptr, *Path);
+    if (!Loaded) {
+      const FString WithC =
+          Path.EndsWith(TEXT("_C")) ? Path : (Path + TEXT("_C"));
+      Loaded = LoadObject<UClass>(nullptr, *WithC);
+    }
+    if (!Loaded) {
+      FString WithoutC = Path;
+      if (WithoutC.EndsWith(TEXT("_C")))
+        WithoutC.LeftChopInline(2);
+      if (UObject *Obj = LoadObject<UObject>(nullptr, *WithoutC)) {
+        if (UBlueprint *BP = Cast<UBlueprint>(Obj)) {
+          Loaded = BP->GeneratedClass;
+        }
+      }
+    }
+    if (!Loaded) {
+      OutError = FString::Printf(TEXT("Class not found: %s"), *Path);
+      return false;
+    }
+    if (CP->MetaClass && !Loaded->IsChildOf(CP->MetaClass)) {
+      OutError = FString::Printf(TEXT("%s is not a subclass of %s"),
+                                 *Loaded->GetName(), *CP->MetaClass->GetName());
+      return false;
+    }
+    CP->SetObjectPropertyValue(RawMem, Loaded);
+    return true;
+  }
+
+  if (FSoftClassProperty *SCP = CastField<FSoftClassProperty>(Prop)) {
+    if (Value->Type != EJson::String) {
+      OutError = TEXT("Expected string path for soft class property");
+      return false;
+    }
+    FSoftObjectPath SoftPath(Value->AsString());
+    *static_cast<FSoftObjectPtr *>(RawMem) = FSoftObjectPtr(SoftPath);
+    return true;
+  }
+
+  if (FObjectProperty *OP = CastField<FObjectProperty>(Prop)) {
+    if (Value->Type != EJson::String) {
+      OutError = TEXT("Expected string path for object property");
+      return false;
+    }
+    const FString Path = Value->AsString();
+    UObject *Loaded = Path.IsEmpty() ? nullptr : LoadObject<UObject>(nullptr, *Path);
+    OP->SetObjectPropertyValue(RawMem, Loaded);
+    return true;
+  }
+
+  FString ValueStr;
+  if (Value->Type == EJson::String) {
+    ValueStr = Value->AsString();
+  } else if (Value->Type == EJson::Number) {
+    ValueStr = FString::SanitizeFloat(Value->AsNumber());
+  } else if (Value->Type == EJson::Boolean) {
+    ValueStr = Value->AsBool() ? TEXT("True") : TEXT("False");
+  } else {
+    OutError = TEXT("Unsupported JSON type for primitive map element");
+    return false;
+  }
+  const TCHAR *ImportResult =
+      Prop->ImportText_Direct(*ValueStr, RawMem, nullptr, PPF_None);
+  if (!ImportResult) {
+    OutError = FString::Printf(TEXT("Failed to import '%s' into %s"),
+                               *ValueStr, *Prop->GetClass()->GetName());
+    return false;
+  }
+  return true;
+}
+
+// Export a property's memory at RawMem to a JSON value, mirroring the
+// types accepted by WriteJsonToPropertyMemory.
+static TSharedPtr<FJsonValue> ReadPropertyMemoryToJson(FProperty *Prop,
+                                                       const void *RawMem) {
+  if (!Prop || !RawMem)
+    return MakeShared<FJsonValueNull>();
+
+  if (FStructProperty *SP = CastField<FStructProperty>(Prop)) {
+    if (SP->Struct && SP->Struct->GetFName() == TEXT("GameplayTag")) {
+      if (FNameProperty *NP = CastField<FNameProperty>(
+              SP->Struct->FindPropertyByName(TEXT("TagName")))) {
+        return MakeShared<FJsonValueString>(
+            NP->GetPropertyValue_InContainer(RawMem).ToString());
+      }
+    }
+    if (SP->Struct) {
+      TSharedRef<FJsonObject> Out = MakeShared<FJsonObject>();
+      if (FJsonObjectConverter::UStructToJsonObject(SP->Struct, RawMem, Out, 0, 0)) {
+        return MakeShared<FJsonValueObject>(Out);
+      }
+    }
+    return MakeShared<FJsonValueNull>();
+  }
+  if (FClassProperty *CP = CastField<FClassProperty>(Prop)) {
+    UObject *Obj = CP->GetObjectPropertyValue(RawMem);
+    return Obj ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Obj->GetPathName()))
+               : TSharedPtr<FJsonValue>(MakeShared<FJsonValueNull>());
+  }
+  if (FObjectProperty *OP = CastField<FObjectProperty>(Prop)) {
+    UObject *Obj = OP->GetObjectPropertyValue(RawMem);
+    return Obj ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Obj->GetPathName()))
+               : TSharedPtr<FJsonValue>(MakeShared<FJsonValueNull>());
+  }
+  FString Str;
+  Prop->ExportTextItem_Direct(Str, RawMem, nullptr, nullptr, PPF_None);
+  return MakeShared<FJsonValueString>(Str);
+}
+
+// If TargetObject is a Class Default Object, mark the owning Blueprint as
+// modified so the editor saves the new defaults with the Blueprint asset.
+static void MarkCDOOwnerBlueprintModified(UObject *TargetObject) {
+  if (!TargetObject || !TargetObject->HasAllFlags(RF_ClassDefaultObject))
+    return;
+  if (UClass *Cls = TargetObject->GetClass()) {
+    if (UBlueprint *BP = Cast<UBlueprint>(Cls->ClassGeneratedBy)) {
+      FBlueprintEditorUtils::MarkBlueprintAsModified(BP);
+    }
+  }
+}
+
+} // namespace
+
 bool UMcpAutomationBridgeSubsystem::HandleInspectAction(
     const FString &RequestId, const FString &Action,
     const TSharedPtr<FJsonObject> &Payload,
@@ -1025,8 +1218,8 @@ bool UMcpAutomationBridgeSubsystem::HandleInspectAction(
     LowerSubAction.Equals(TEXT("find_by_tag")) ||
     LowerSubAction.Equals(TEXT("inspect_class"));
 
-  // Actions that require actorName instead of objectPath
-  const bool bIsActorAction = 
+  // Actions that require actorName instead of objectPath (actor-only operations)
+  const bool bIsActorAction =
     LowerSubAction.Equals(TEXT("get_components")) ||
     LowerSubAction.Equals(TEXT("get_component_property")) ||
     LowerSubAction.Equals(TEXT("set_component_property")) ||
@@ -1034,11 +1227,19 @@ bool UMcpAutomationBridgeSubsystem::HandleInspectAction(
     LowerSubAction.Equals(TEXT("add_tag")) ||
     LowerSubAction.Equals(TEXT("create_snapshot")) ||
     LowerSubAction.Equals(TEXT("restore_snapshot")) ||
-    LowerSubAction.Equals(TEXT("export")) ||
     LowerSubAction.Equals(TEXT("delete_object")) ||
-    LowerSubAction.Equals(TEXT("get_bounding_box")) ||
+    LowerSubAction.Equals(TEXT("get_bounding_box"));
+
+  // Actions that work on any UObject via objectPath (not just actors)
+  const bool bIsObjectPropertyAction =
+    LowerSubAction.Equals(TEXT("get_property")) ||
     LowerSubAction.Equals(TEXT("set_property")) ||
-    LowerSubAction.Equals(TEXT("get_property"));
+    LowerSubAction.Equals(TEXT("export")) ||
+    LowerSubAction.Equals(TEXT("call_function")) ||
+    LowerSubAction.Equals(TEXT("set_map_entry")) ||
+    LowerSubAction.Equals(TEXT("add_map_entry")) ||
+    LowerSubAction.Equals(TEXT("remove_map_entry")) ||
+    LowerSubAction.Equals(TEXT("list_map_entries"));
 
   // Delegate actor-related actions to the control_actor handler
   if (bIsActorAction) {
@@ -1302,14 +1503,12 @@ bool UMcpAutomationBridgeSubsystem::HandleInspectAction(
     TargetObject = FindObject<UObject>(nullptr, *ObjectPath);
   }
   
-  // If not found, try to find actor by name/label
+  // If not found, try to find actor by name/label in editor world
   if (!TargetObject && GEditor) {
-    // Also try FindActorByName helper which handles both label and name matching
     if (AActor *FoundActor = FindActorByName(ObjectPath)) {
       TargetObject = FoundActor;
       ObjectPath = FoundActor->GetPathName();
     } else {
-      // Fallback: iterate all actors
       UWorld *World = GEditor->GetEditorWorldContext().World();
       if (World) {
         for (TActorIterator<AActor> It(World); It; ++It) {
@@ -1324,11 +1523,554 @@ bool UMcpAutomationBridgeSubsystem::HandleInspectAction(
     }
   }
 
+  // If not found in editor world, try PIE world (runtime actors during Play-In-Editor)
+  bool bFoundInPIE = false;
+  if (!TargetObject && GEditor) {
+    // Check if PIE is active and search PIE worlds
+    for (const FWorldContext& Context : GEngine->GetWorldContexts())
+    {
+      if (Context.WorldType == EWorldType::PIE && Context.World())
+      {
+        UWorld* PIEWorld = Context.World();
+        for (TActorIterator<AActor> It(PIEWorld); It; ++It)
+        {
+          AActor *Actor = *It;
+          if (Actor && (Actor->GetActorLabel().Equals(ObjectPath, ESearchCase::IgnoreCase) ||
+                        Actor->GetName().Equals(ObjectPath, ESearchCase::IgnoreCase)))
+          {
+            TargetObject = Actor;
+            bFoundInPIE = true;
+            break;
+          }
+        }
+        if (TargetObject) break;
+
+        // Also try FindObject within PIE world
+        UObject* PIEObj = FindObject<UObject>(PIEWorld, *ObjectPath);
+        if (PIEObj)
+        {
+          TargetObject = PIEObj;
+          bFoundInPIE = true;
+          break;
+        }
+      }
+    }
+  }
+
+  // If still not found, try loading as an asset package (any mount point)
+  if (!TargetObject && ObjectPath.StartsWith(TEXT("/"))) {
+    TargetObject = StaticFindObject(UObject::StaticClass(), nullptr, *ObjectPath);
+    if (!TargetObject) {
+      FString PackagePath = ObjectPath;
+      if (PackagePath.Contains(TEXT("."))) {
+        PackagePath = PackagePath.Left(PackagePath.Find(TEXT(".")));
+      }
+      UPackage* LoadedPackage = LoadPackage(nullptr, *PackagePath, LOAD_None);
+      if (LoadedPackage) {
+        TargetObject = FindObject<UObject>(LoadedPackage, *ObjectPath);
+        if (!TargetObject) {
+          FString AssetName = FPaths::GetBaseFilename(PackagePath);
+          TargetObject = FindObject<UObject>(LoadedPackage, *AssetName);
+        }
+      }
+    }
+  }
+
+  // Final fallback: query the AssetRegistry. Lets callers reach plugin-mount assets
+  // when their path is missing a content-subfolder segment (e.g. /ALS/Character/AB
+  // instead of /ALS/ALS/Character/AB), and also resolves bare asset names by suffix.
+  FString PathSuggestionList;
   if (!TargetObject) {
-    SendAutomationError(RequestingSocket, RequestId,
-                        FString::Printf(TEXT("Object not found: %s"), *ObjectPath),
-                        TEXT("OBJECT_NOT_FOUND"));
+    FAssetRegistryModule& AssetRegistryModule =
+      FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+    IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
+
+    // Derive a probable asset name from the final path segment (strip any .AssetName suffix).
+    FString ProbeName = ObjectPath;
+    int32 LastDot = INDEX_NONE;
+    if (ProbeName.FindLastChar(TEXT('.'), LastDot)) {
+      ProbeName = ProbeName.Left(LastDot);
+    }
+    int32 LastSlash = INDEX_NONE;
+    if (ProbeName.FindLastChar(TEXT('/'), LastSlash)) {
+      ProbeName = ProbeName.Mid(LastSlash + 1);
+    }
+
+    if (!ProbeName.IsEmpty()) {
+      FARFilter Filter;
+      Filter.PackageNames.Empty();
+      Filter.bRecursivePaths = true;
+      // Search all mounted roots; the asset registry has them indexed.
+      TArray<FAssetData> Candidates;
+      AssetRegistry.GetAssetsByPackageName(FName(*ObjectPath), Candidates);
+      if (Candidates.Num() == 0) {
+        // Broader search: assets whose AssetName matches the probe (case-insensitive).
+        AssetRegistry.GetAllAssets(Candidates, /*bIncludeOnlyOnDiskAssets=*/true);
+        Candidates.RemoveAll([&ProbeName](const FAssetData& Data) {
+          return !Data.AssetName.ToString().Equals(ProbeName, ESearchCase::IgnoreCase);
+        });
+      }
+
+      if (Candidates.Num() == 1) {
+        // Unambiguous match: load it.
+        TargetObject = Candidates[0].GetAsset();
+        if (TargetObject) {
+          ObjectPath = TargetObject->GetPathName();
+        }
+      } else if (Candidates.Num() > 1) {
+        // Multiple matches: build a suggestion list so the caller can pick.
+        int32 ShownCount = 0;
+        for (const FAssetData& Cand : Candidates) {
+          if (ShownCount >= 8) {
+            PathSuggestionList += FString::Printf(TEXT("\n  ... (%d more)"), Candidates.Num() - ShownCount);
+            break;
+          }
+#if ENGINE_MAJOR_VERSION >= 5 && ENGINE_MINOR_VERSION >= 1
+          PathSuggestionList += FString::Printf(TEXT("\n  %s"), *Cand.GetSoftObjectPath().ToString());
+#else
+          PathSuggestionList += FString::Printf(TEXT("\n  %s"), *Cand.ToSoftObjectPath().ToString());
+#endif
+          ShownCount++;
+        }
+      }
+    }
+  }
+
+  if (!TargetObject) {
+    const FString Message = PathSuggestionList.IsEmpty()
+      ? FString::Printf(TEXT("Object not found: %s"), *ObjectPath)
+      : FString::Printf(TEXT("Object not found at '%s'. Candidates with matching asset name:%s"), *ObjectPath, *PathSuggestionList);
+    SendAutomationError(RequestingSocket, RequestId, Message, TEXT("OBJECT_NOT_FOUND"));
     return true;
+  }
+
+  // Handle get_property / set_property / export on any UObject
+  if (bIsObjectPropertyAction)
+  {
+    if (LowerSubAction.Equals(TEXT("get_property")))
+    {
+      FString PropertyName;
+      Payload->TryGetStringField(TEXT("propertyName"), PropertyName);
+      if (PropertyName.IsEmpty())
+      {
+        Payload->TryGetStringField(TEXT("propertyPath"), PropertyName);
+      }
+      if (PropertyName.IsEmpty())
+      {
+        SendAutomationError(RequestingSocket, RequestId,
+                            TEXT("propertyName is required"), TEXT("INVALID_ARGUMENT"));
+        return true;
+      }
+
+      // Find the property by name
+      FProperty* Prop = TargetObject->GetClass()->FindPropertyByName(FName(*PropertyName));
+      if (!Prop)
+      {
+        // Try case-insensitive search
+        for (TFieldIterator<FProperty> It(TargetObject->GetClass()); It; ++It)
+        {
+          if (It->GetName().Equals(PropertyName, ESearchCase::IgnoreCase))
+          {
+            Prop = *It;
+            break;
+          }
+        }
+      }
+      if (!Prop)
+      {
+        SendAutomationError(RequestingSocket, RequestId,
+                            FString::Printf(TEXT("Property '%s' not found on %s (%s)"),
+                                            *PropertyName, *TargetObject->GetName(),
+                                            *TargetObject->GetClass()->GetName()),
+                            TEXT("PROPERTY_NOT_FOUND"));
+        return true;
+      }
+
+      TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
+      Resp->SetStringField(TEXT("objectPath"), TargetObject->GetPathName());
+      Resp->SetStringField(TEXT("propertyName"), Prop->GetName());
+      Resp->SetStringField(TEXT("propertyType"), Prop->GetCPPType());
+
+      TSharedPtr<FJsonValue> JsonVal = ExportPropertyToJsonValue(TargetObject, Prop);
+      if (JsonVal.IsValid())
+      {
+        Resp->SetField(TEXT("value"), JsonVal);
+      }
+      else
+      {
+        FString ValueStr;
+        MCP_PROPERTY_EXPORT_TEXT(Prop, ValueStr,
+                                Prop->ContainerPtrToValuePtr<void>(TargetObject),
+                                nullptr, nullptr, PPF_None);
+        Resp->SetStringField(TEXT("value"), ValueStr);
+      }
+
+      Resp->SetBoolField(TEXT("success"), true);
+      SendAutomationResponse(RequestingSocket, RequestId, true,
+                             TEXT("Property retrieved"), Resp, FString());
+      return true;
+    }
+    else if (LowerSubAction.Equals(TEXT("set_property")))
+    {
+      // Delegate to HandleSetObjectProperty which supports any UObject (not just actors)
+      // Construct a set_object_property payload from the inspect payload
+      TSharedPtr<FJsonObject> SetPayload = MakeShared<FJsonObject>();
+      SetPayload->SetStringField(TEXT("objectPath"), ObjectPath);
+      FString PropName;
+      Payload->TryGetStringField(TEXT("propertyName"), PropName);
+      if (PropName.IsEmpty()) Payload->TryGetStringField(TEXT("propertyPath"), PropName);
+      SetPayload->SetStringField(TEXT("propertyName"), PropName);
+      if (Payload->HasField(TEXT("value")))
+      {
+        SetPayload->SetField(TEXT("value"), Payload->TryGetField(TEXT("value")));
+      }
+      return HandleSetObjectProperty(RequestId, TEXT("set_object_property"), SetPayload, RequestingSocket);
+    }
+    else if (LowerSubAction.Equals(TEXT("export")))
+    {
+      // Export all UPROPERTY values as a JSON object
+      TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
+      Resp->SetStringField(TEXT("objectPath"), TargetObject->GetPathName());
+      Resp->SetStringField(TEXT("objectName"), TargetObject->GetName());
+      Resp->SetStringField(TEXT("className"), TargetObject->GetClass()->GetName());
+
+      TSharedPtr<FJsonObject> PropertiesObj = MakeShared<FJsonObject>();
+      for (TFieldIterator<FProperty> PropIt(TargetObject->GetClass()); PropIt; ++PropIt)
+      {
+        FProperty* Prop = *PropIt;
+        if (!Prop) continue;
+        if (!(Prop->PropertyFlags & (CPF_Edit | CPF_BlueprintVisible | CPF_Config | CPF_BlueprintReadOnly)))
+          continue;
+
+        TSharedPtr<FJsonValue> JsonVal = ExportPropertyToJsonValue(TargetObject, Prop);
+        if (JsonVal.IsValid())
+        {
+          PropertiesObj->SetField(Prop->GetName(), JsonVal);
+        }
+        else
+        {
+          FString ValueStr;
+          MCP_PROPERTY_EXPORT_TEXT(Prop, ValueStr,
+                                  Prop->ContainerPtrToValuePtr<void>(TargetObject),
+                                  nullptr, nullptr, PPF_None);
+          if (!ValueStr.IsEmpty())
+          {
+            PropertiesObj->SetStringField(Prop->GetName(), ValueStr);
+          }
+        }
+      }
+      Resp->SetObjectField(TEXT("properties"), PropertiesObj);
+      Resp->SetBoolField(TEXT("success"), true);
+      SendAutomationResponse(RequestingSocket, RequestId, true,
+                             TEXT("Object exported"), Resp, FString());
+      return true;
+    }
+    else if (LowerSubAction.Equals(TEXT("call_function")))
+    {
+      FString FunctionName;
+      Payload->TryGetStringField(TEXT("functionName"), FunctionName);
+      if (FunctionName.IsEmpty())
+      {
+        SendAutomationError(RequestingSocket, RequestId,
+                            TEXT("functionName is required"), TEXT("INVALID_ARGUMENT"));
+        return true;
+      }
+
+      UFunction* Function = TargetObject->FindFunction(FName(*FunctionName));
+      if (!Function)
+      {
+        // Try case-insensitive search
+        for (TFieldIterator<UFunction> It(TargetObject->GetClass()); It; ++It)
+        {
+          if (It->GetName().Equals(FunctionName, ESearchCase::IgnoreCase))
+          {
+            Function = *It;
+            break;
+          }
+        }
+      }
+      if (!Function)
+      {
+        SendAutomationError(RequestingSocket, RequestId,
+                            FString::Printf(TEXT("Function '%s' not found on %s (%s)"),
+                                            *FunctionName, *TargetObject->GetName(),
+                                            *TargetObject->GetClass()->GetName()),
+                            TEXT("FUNCTION_NOT_FOUND"));
+        return true;
+      }
+
+      // Build parameters buffer from JSON arguments
+      TSharedPtr<FJsonObject> ArgsObj;
+      const TSharedPtr<FJsonObject>* ArgsPtr = nullptr;
+      if (Payload->TryGetObjectField(TEXT("arguments"), ArgsPtr) && ArgsPtr)
+      {
+        ArgsObj = *ArgsPtr;
+      }
+
+      void* ParmsBuffer = nullptr;
+      if (Function->ParmsSize > 0)
+      {
+        ParmsBuffer = FMemory::Malloc(Function->ParmsSize, 16);
+        FMemory::Memzero(ParmsBuffer, Function->ParmsSize);
+
+        // Try to populate parameters from the arguments JSON
+        if (ArgsObj.IsValid())
+        {
+          for (TFieldIterator<FProperty> ParamIt(Function); ParamIt; ++ParamIt)
+          {
+            FProperty* Param = *ParamIt;
+            if (!Param || !(Param->PropertyFlags & CPF_Parm)) continue;
+            if (Param->PropertyFlags & CPF_ReturnParm) continue;
+
+            TSharedPtr<FJsonValue> ParamVal = ArgsObj->TryGetField(Param->GetName());
+            if (!ParamVal.IsValid()) continue;
+
+            void* ValuePtr = Param->ContainerPtrToValuePtr<void>(ParmsBuffer);
+            if (FStrProperty* StrProp = CastField<FStrProperty>(Param))
+            {
+              StrProp->SetPropertyValue(ValuePtr, ParamVal->AsString());
+            }
+            else if (FIntProperty* IntProp = CastField<FIntProperty>(Param))
+            {
+              IntProp->SetPropertyValue(ValuePtr, static_cast<int32>(ParamVal->AsNumber()));
+            }
+            else if (FFloatProperty* FloatProp = CastField<FFloatProperty>(Param))
+            {
+              FloatProp->SetPropertyValue(ValuePtr, static_cast<float>(ParamVal->AsNumber()));
+            }
+            else if (FDoubleProperty* DblProp = CastField<FDoubleProperty>(Param))
+            {
+              DblProp->SetPropertyValue(ValuePtr, ParamVal->AsNumber());
+            }
+            else if (FBoolProperty* BoolProp = CastField<FBoolProperty>(Param))
+            {
+              BoolProp->SetPropertyValue(ValuePtr, ParamVal->AsBool());
+            }
+            else if (FNameProperty* NameProp = CastField<FNameProperty>(Param))
+            {
+              NameProp->SetPropertyValue(ValuePtr, FName(*ParamVal->AsString()));
+            }
+            else
+            {
+              // Fallback: try ImportText
+              Param->ImportText_Direct(*ParamVal->AsString(), ValuePtr, nullptr, PPF_None);
+            }
+          }
+        }
+      }
+
+      TargetObject->ProcessEvent(Function, ParmsBuffer);
+
+      // Extract return value if any
+      TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
+      Resp->SetStringField(TEXT("objectPath"), TargetObject->GetPathName());
+      Resp->SetStringField(TEXT("functionName"), Function->GetName());
+
+      if (ParmsBuffer)
+      {
+        for (TFieldIterator<FProperty> ParamIt(Function); ParamIt; ++ParamIt)
+        {
+          FProperty* Param = *ParamIt;
+          if (!Param || !(Param->PropertyFlags & CPF_ReturnParm)) continue;
+
+          void* ValuePtr = Param->ContainerPtrToValuePtr<void>(ParmsBuffer);
+          TSharedPtr<FJsonValue> RetVal = ExportPropertyToJsonValue(ParmsBuffer, Param);
+          if (RetVal.IsValid())
+          {
+            Resp->SetField(TEXT("returnValue"), RetVal);
+          }
+          else
+          {
+            FString ValueStr;
+            MCP_PROPERTY_EXPORT_TEXT(Param, ValueStr, ValuePtr, nullptr, nullptr, PPF_None);
+            Resp->SetStringField(TEXT("returnValue"), ValueStr);
+          }
+          break;
+        }
+        FMemory::Free(ParmsBuffer);
+      }
+
+      Resp->SetBoolField(TEXT("success"), true);
+      SendAutomationResponse(RequestingSocket, RequestId, true,
+                             TEXT("Function called"), Resp, FString());
+      return true;
+    }
+    else if (LowerSubAction.Equals(TEXT("set_map_entry")) ||
+             LowerSubAction.Equals(TEXT("add_map_entry")) ||
+             LowerSubAction.Equals(TEXT("remove_map_entry")) ||
+             LowerSubAction.Equals(TEXT("list_map_entries")))
+    {
+      FString PropName;
+      Payload->TryGetStringField(TEXT("propertyName"), PropName);
+      if (PropName.IsEmpty()) Payload->TryGetStringField(TEXT("propertyPath"), PropName);
+      if (PropName.IsEmpty()) {
+        SendAutomationError(RequestingSocket, RequestId,
+                            TEXT("propertyName is required"), TEXT("INVALID_ARGUMENT"));
+        return true;
+      }
+
+      FProperty *Prop = TargetObject->GetClass()->FindPropertyByName(FName(*PropName));
+      if (!Prop) {
+        SendAutomationError(RequestingSocket, RequestId,
+                            FString::Printf(TEXT("Property '%s' not found on %s"),
+                                            *PropName, *TargetObject->GetClass()->GetName()),
+                            TEXT("UNKNOWN_PROPERTY"));
+        return true;
+      }
+      FMapProperty *MP = CastField<FMapProperty>(Prop);
+      if (!MP) {
+        SendAutomationError(RequestingSocket, RequestId,
+                            FString::Printf(TEXT("Property '%s' is not a TMap (got %s)"),
+                                            *PropName, *Prop->GetClass()->GetName()),
+                            TEXT("NOT_A_MAP"));
+        return true;
+      }
+
+      void *MapAddr = MP->ContainerPtrToValuePtr<void>(TargetObject);
+      FScriptMapHelper MapHelper(MP, MapAddr);
+
+      // list_map_entries: dump every (key, value) pair as JSON.
+      if (LowerSubAction.Equals(TEXT("list_map_entries"))) {
+        TArray<TSharedPtr<FJsonValue>> EntriesArr;
+        for (int32 i = 0; i < MapHelper.GetMaxIndex(); ++i) {
+          if (!MapHelper.IsValidIndex(i)) continue;
+          TSharedPtr<FJsonObject> EntryObj = MakeShared<FJsonObject>();
+          EntryObj->SetField(TEXT("key"), ReadPropertyMemoryToJson(MP->KeyProp, MapHelper.GetKeyPtr(i)));
+          EntryObj->SetField(TEXT("value"), ReadPropertyMemoryToJson(MP->ValueProp, MapHelper.GetValuePtr(i)));
+          EntriesArr.Add(MakeShared<FJsonValueObject>(EntryObj));
+        }
+        TSharedPtr<FJsonObject> ListResp = MakeShared<FJsonObject>();
+        ListResp->SetStringField(TEXT("objectPath"), TargetObject->GetPathName());
+        ListResp->SetStringField(TEXT("propertyName"), PropName);
+        ListResp->SetArrayField(TEXT("entries"), EntriesArr);
+        ListResp->SetNumberField(TEXT("count"), MapHelper.Num());
+        ListResp->SetStringField(TEXT("keyType"), MP->KeyProp->GetClass()->GetName());
+        ListResp->SetStringField(TEXT("valueType"), MP->ValueProp->GetClass()->GetName());
+        ListResp->SetBoolField(TEXT("success"), true);
+        SendAutomationResponse(RequestingSocket, RequestId, true,
+                               TEXT("Map entries listed"), ListResp, FString());
+        return true;
+      }
+
+      // Parse key (required for add/set/remove).
+      TSharedPtr<FJsonValue> KeyJson = Payload->TryGetField(TEXT("key"));
+      if (!KeyJson.IsValid()) {
+        SendAutomationError(RequestingSocket, RequestId,
+                            TEXT("'key' is required"), TEXT("INVALID_ARGUMENT"));
+        return true;
+      }
+
+      // Allocate scratch key memory.
+      const int32 KeyElementSize = MP->KeyProp->GetElementSize();
+      const int32 KeyMinAlign = MP->KeyProp->GetMinAlignment();
+      void *KeyBuf = FMemory::Malloc(KeyElementSize, KeyMinAlign);
+      MP->KeyProp->InitializeValue(KeyBuf);
+
+      FString WriteErr;
+      if (!WriteJsonToPropertyMemory(MP->KeyProp, KeyBuf, KeyJson, WriteErr)) {
+        MP->KeyProp->DestroyValue(KeyBuf);
+        FMemory::Free(KeyBuf);
+        SendAutomationError(RequestingSocket, RequestId,
+                            FString::Printf(TEXT("Failed to parse key: %s"), *WriteErr),
+                            TEXT("INVALID_KEY"));
+        return true;
+      }
+
+      // Find existing pair with matching key.
+      int32 FoundIdx = INDEX_NONE;
+      for (int32 i = 0; i < MapHelper.GetMaxIndex(); ++i) {
+        if (!MapHelper.IsValidIndex(i)) continue;
+        if (MP->KeyProp->Identical(KeyBuf, MapHelper.GetKeyPtr(i))) {
+          FoundIdx = i;
+          break;
+        }
+      }
+
+      TargetObject->Modify();
+
+      if (LowerSubAction.Equals(TEXT("remove_map_entry"))) {
+        bool bRemoved = false;
+        if (FoundIdx != INDEX_NONE) {
+          MapHelper.RemoveAt(FoundIdx);
+          bRemoved = true;
+        }
+        MP->KeyProp->DestroyValue(KeyBuf);
+        FMemory::Free(KeyBuf);
+        if (bRemoved) {
+          TargetObject->MarkPackageDirty();
+          MarkCDOOwnerBlueprintModified(TargetObject);
+        }
+        TSharedPtr<FJsonObject> RemoveResp = MakeShared<FJsonObject>();
+        RemoveResp->SetStringField(TEXT("objectPath"), TargetObject->GetPathName());
+        RemoveResp->SetStringField(TEXT("propertyName"), PropName);
+        RemoveResp->SetBoolField(TEXT("removed"), bRemoved);
+        RemoveResp->SetNumberField(TEXT("mapSize"), MapHelper.Num());
+        RemoveResp->SetBoolField(TEXT("success"), true);
+        SendAutomationResponse(RequestingSocket, RequestId, true,
+                               bRemoved ? TEXT("Map entry removed")
+                                        : TEXT("Map entry not found (no-op)"),
+                               RemoveResp, FString());
+        return true;
+      }
+
+      // set_map_entry / add_map_entry: parse value and write.
+      TSharedPtr<FJsonValue> ValJson = Payload->TryGetField(TEXT("value"));
+      if (!ValJson.IsValid()) {
+        MP->KeyProp->DestroyValue(KeyBuf);
+        FMemory::Free(KeyBuf);
+        SendAutomationError(RequestingSocket, RequestId,
+                            TEXT("'value' is required"), TEXT("INVALID_ARGUMENT"));
+        return true;
+      }
+
+      const int32 ValElementSize = MP->ValueProp->GetElementSize();
+      const int32 ValMinAlign = MP->ValueProp->GetMinAlignment();
+      void *ValBuf = FMemory::Malloc(ValElementSize, ValMinAlign);
+      MP->ValueProp->InitializeValue(ValBuf);
+
+      if (!WriteJsonToPropertyMemory(MP->ValueProp, ValBuf, ValJson, WriteErr)) {
+        MP->KeyProp->DestroyValue(KeyBuf);
+        FMemory::Free(KeyBuf);
+        MP->ValueProp->DestroyValue(ValBuf);
+        FMemory::Free(ValBuf);
+        SendAutomationError(RequestingSocket, RequestId,
+                            FString::Printf(TEXT("Failed to parse value: %s"), *WriteErr),
+                            TEXT("INVALID_VALUE"));
+        return true;
+      }
+
+      bool bWasUpdate = false;
+      if (FoundIdx != INDEX_NONE) {
+        MP->ValueProp->CopyCompleteValue(MapHelper.GetValuePtr(FoundIdx), ValBuf);
+        bWasUpdate = true;
+      } else {
+        const int32 NewIdx = MapHelper.AddDefaultValue_Invalid_NeedsRehash();
+        MP->KeyProp->CopyCompleteValue(MapHelper.GetKeyPtr(NewIdx), KeyBuf);
+        MP->ValueProp->CopyCompleteValue(MapHelper.GetValuePtr(NewIdx), ValBuf);
+        MapHelper.Rehash();
+      }
+
+      MP->KeyProp->DestroyValue(KeyBuf);
+      FMemory::Free(KeyBuf);
+      MP->ValueProp->DestroyValue(ValBuf);
+      FMemory::Free(ValBuf);
+
+      TargetObject->MarkPackageDirty();
+      MarkCDOOwnerBlueprintModified(TargetObject);
+
+      TSharedPtr<FJsonObject> SetResp = MakeShared<FJsonObject>();
+      SetResp->SetStringField(TEXT("objectPath"), TargetObject->GetPathName());
+      SetResp->SetStringField(TEXT("propertyName"), PropName);
+      SetResp->SetBoolField(TEXT("updated"), bWasUpdate);
+      SetResp->SetStringField(TEXT("operation"), bWasUpdate ? TEXT("update") : TEXT("add"));
+      SetResp->SetNumberField(TEXT("mapSize"), MapHelper.Num());
+      SetResp->SetBoolField(TEXT("success"), true);
+      SendAutomationResponse(RequestingSocket, RequestId, true,
+                             bWasUpdate ? TEXT("Map entry updated")
+                                        : TEXT("Map entry added"),
+                             SetResp, FString());
+      return true;
+    }
   }
 
   // Build inspection result
@@ -1406,6 +2148,62 @@ bool UMcpAutomationBridgeSubsystem::HandleInspectAction(
     Resp->SetBoolField(TEXT("isActor"), false);
   }
   
+  // Serialize all reflected UPROPERTY values on the object
+  {
+    TSharedPtr<FJsonObject> PropertiesObj = MakeShared<FJsonObject>();
+    UClass* IterClass = TargetObject->GetClass();
+    // Find the first non-engine ancestor to skip base UObject/AActor/UDataAsset noise
+    UClass* StopAtClass = UObject::StaticClass();
+    if (AActor* AsActor = Cast<AActor>(TargetObject))
+    {
+      StopAtClass = AActor::StaticClass();
+    }
+    else if (TargetObject->IsA(UDataAsset::StaticClass()))
+    {
+      StopAtClass = UDataAsset::StaticClass();
+    }
+
+    for (TFieldIterator<FProperty> PropIt(IterClass); PropIt; ++PropIt)
+    {
+      FProperty* Prop = *PropIt;
+      if (!Prop) continue;
+
+      // Skip properties from base engine classes to reduce noise
+      if (Prop->GetOwnerClass() && Prop->GetOwnerClass()->IsChildOf(StopAtClass) &&
+          Prop->GetOwnerClass() != IterClass)
+      {
+        // Allow properties from the target's own class and its custom ancestors,
+        // but skip properties defined on UObject/AActor/UDataAsset themselves
+        if (Prop->GetOwnerClass() == StopAtClass)
+          continue;
+      }
+
+      // Only include properties with UPROPERTY (CPF_Edit or CPF_BlueprintVisible or any reflection flag)
+      if (!(Prop->PropertyFlags & (CPF_Edit | CPF_BlueprintVisible | CPF_Config | CPF_BlueprintReadOnly)))
+        continue;
+
+      void* Container = TargetObject;
+      TSharedPtr<FJsonValue> JsonVal = ExportPropertyToJsonValue(Container, Prop);
+      if (JsonVal.IsValid())
+      {
+        PropertiesObj->SetField(Prop->GetName(), JsonVal);
+      }
+      else
+      {
+        // For properties that ExportPropertyToJsonValue can't handle,
+        // export as string via the property's ExportText
+        FString ValueStr;
+        MCP_PROPERTY_EXPORT_TEXT(Prop, ValueStr, Prop->ContainerPtrToValuePtr<void>(Container),
+                                nullptr, nullptr, PPF_None);
+        if (!ValueStr.IsEmpty())
+        {
+          PropertiesObj->SetStringField(Prop->GetName(), ValueStr);
+        }
+      }
+    }
+    Resp->SetObjectField(TEXT("properties"), PropertiesObj);
+  }
+
   // Tags - only for Actor-derived classes to avoid assertion failure
   TArray<TSharedPtr<FJsonValue>> TagsArray;
   UClass* ObjClass = TargetObject->GetClass();

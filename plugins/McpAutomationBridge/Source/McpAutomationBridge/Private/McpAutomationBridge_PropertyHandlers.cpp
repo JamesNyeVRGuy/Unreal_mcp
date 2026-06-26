@@ -80,16 +80,26 @@ bool UMcpAutomationBridgeSubsystem::HandleSetObjectProperty(
       ObjectPath = FoundActor->GetPathName();
     }
   }
-  if (!RootObject && ObjectPath.StartsWith(TEXT("/Game/"))) {
-    FString PackagePath = ObjectPath;
-    if (PackagePath.Contains(TEXT("."))) {
-      PackagePath = PackagePath.Left(PackagePath.Find(TEXT(".")));
-    }
-    UPackage* LoadedPackage = LoadPackage(nullptr, *PackagePath, LOAD_None);
-    if (LoadedPackage) {
-      RootObject = FindObject<UObject>(LoadedPackage, *ObjectPath);
-      if (!RootObject) {
-        RootObject = LoadedPackage;
+  if (!RootObject && ObjectPath.StartsWith(TEXT("/"))) {
+    // Try StaticFindObject first (already loaded assets)
+    RootObject = StaticFindObject(UObject::StaticClass(), nullptr, *ObjectPath);
+    if (!RootObject)
+    {
+      // Try loading the package for any mount point (/Game/, /Engine/, /PluginName/, etc.)
+      FString PackagePath = ObjectPath;
+      if (PackagePath.Contains(TEXT("."))) {
+        PackagePath = PackagePath.Left(PackagePath.Find(TEXT(".")));
+      }
+      UPackage* LoadedPackage = LoadPackage(nullptr, *PackagePath, LOAD_None);
+      if (LoadedPackage) {
+        RootObject = FindObject<UObject>(LoadedPackage, *ObjectPath);
+        if (!RootObject) {
+          FString AssetName = FPaths::GetBaseFilename(PackagePath);
+          RootObject = FindObject<UObject>(LoadedPackage, *AssetName);
+        }
+        if (!RootObject) {
+          RootObject = LoadedPackage;
+        }
       }
     }
   }
@@ -385,16 +395,26 @@ bool UMcpAutomationBridgeSubsystem::HandleGetObjectProperty(
       ObjectPath = FoundActor->GetPathName();
     }
   }
-  if (!RootObject && ObjectPath.StartsWith(TEXT("/Game/"))) {
-    FString PackagePath = ObjectPath;
-    if (PackagePath.Contains(TEXT("."))) {
-      PackagePath = PackagePath.Left(PackagePath.Find(TEXT(".")));
-    }
-    UPackage* LoadedPackage = LoadPackage(nullptr, *PackagePath, LOAD_None);
-    if (LoadedPackage) {
-      RootObject = FindObject<UObject>(LoadedPackage, *ObjectPath);
-      if (!RootObject) {
-        RootObject = LoadedPackage;
+  if (!RootObject && ObjectPath.StartsWith(TEXT("/"))) {
+    // Try StaticFindObject first (already loaded assets)
+    RootObject = StaticFindObject(UObject::StaticClass(), nullptr, *ObjectPath);
+    if (!RootObject)
+    {
+      // Try loading the package for any mount point (/Game/, /Engine/, /PluginName/, etc.)
+      FString PackagePath = ObjectPath;
+      if (PackagePath.Contains(TEXT("."))) {
+        PackagePath = PackagePath.Left(PackagePath.Find(TEXT(".")));
+      }
+      UPackage* LoadedPackage = LoadPackage(nullptr, *PackagePath, LOAD_None);
+      if (LoadedPackage) {
+        RootObject = FindObject<UObject>(LoadedPackage, *ObjectPath);
+        if (!RootObject) {
+          FString AssetName = FPaths::GetBaseFilename(PackagePath);
+          RootObject = FindObject<UObject>(LoadedPackage, *AssetName);
+        }
+        if (!RootObject) {
+          RootObject = LoadedPackage;
+        }
       }
     }
   }

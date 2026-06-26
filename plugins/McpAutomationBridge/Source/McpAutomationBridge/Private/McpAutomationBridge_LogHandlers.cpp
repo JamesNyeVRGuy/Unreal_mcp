@@ -5,13 +5,56 @@
 #include "Misc/OutputDevice.h"
 #include "Async/Async.h"
 
+// Ring buffer entry for log history
+struct FMcpLogEntry
+{
+    FString Category;
+    FString Verbosity;
+    FString Message;
+    double Timestamp;
+};
+
 // Define a custom output device to capture logs and stream them via the bridge
 class FMcpLogOutputDevice : public FOutputDevice
 {
 public:
-    FMcpLogOutputDevice(UMcpAutomationBridgeSubsystem* InSubsystem) 
-        : Subsystem(InSubsystem) 
+    FMcpLogOutputDevice(UMcpAutomationBridgeSubsystem* InSubsystem, bool bEnableStreaming = true)
+        : Subsystem(InSubsystem)
+        , bStreamingEnabled(bEnableStreaming)
     {
+        // Pre-allocate ring buffer
+        LogRingBuffer.SetNum(MaxRingBufferSize);
+        RingWriteIndex = 0;
+        TotalWritten = 0;
+    }
+
+    void SetStreamingEnabled(bool bEnabled) { bStreamingEnabled = bEnabled; }
+
+    static constexpr int32 MaxRingBufferSize = 2000;
+
+    // Read recent log entries. Returns up to Count entries, optionally filtered.
+    TArray<FMcpLogEntry> ReadRecentLogs(int32 Count, const FString& CategoryFilter, const FString& VerbosityFilter) const
+    {
+        FScopeLock Lock(&RingBufferLock);
+        TArray<FMcpLogEntry> Result;
+        int32 Available = FMath::Min((int32)TotalWritten, MaxRingBufferSize);
+        int32 StartIdx = (RingWriteIndex - Available + MaxRingBufferSize) % MaxRingBufferSize;
+
+        for (int32 i = 0; i < Available && Result.Num() < Count; ++i)
+        {
+            int32 Idx = (StartIdx + i) % MaxRingBufferSize;
+            const FMcpLogEntry& Entry = LogRingBuffer[Idx];
+            if (Entry.Message.IsEmpty()) continue;
+
+            // Apply filters
+            if (!CategoryFilter.IsEmpty() && !Entry.Category.Contains(CategoryFilter, ESearchCase::IgnoreCase))
+                continue;
+            if (!VerbosityFilter.IsEmpty() && !Entry.Verbosity.Equals(VerbosityFilter, ESearchCase::IgnoreCase))
+                continue;
+
+            Result.Add(Entry);
+        }
+        return Result;
     }
 
     virtual void Serialize(const TCHAR* V, ELogVerbosity::Type Verbosity, const class FName& Category) override
@@ -21,10 +64,6 @@ public:
             return;
         }
 
-        // Filter out very verbose logs if needed, but for now allow all
-        // Prevent infinite recursion if our own logging causes more logging
-        // Filter out highly verbose categories that clutter test output
-        // Use string comparison to be robust against FName issues
         FString CategoryStr = Category.ToString();
 
         if (Category == LogMcpAutomationBridgeSubsystem.GetCategoryName() ||
@@ -32,22 +71,19 @@ public:
             CategoryStr == TEXT("LogEOSSDK") ||
             CategoryStr == TEXT("LogCsvProfiler"))
         {
-            return; 
+            return;
         }
 
-        // Filter specific noisy warnings
         if (Verbosity == ELogVerbosity::Warning && CategoryStr == TEXT("LogSlateStyle"))
         {
-            // "Missing Resource from 'ProfileVisualizerStyle'" is a known engine warning during 'show collision'
             if (FString(V).Contains(TEXT("Missing Resource from 'ProfileVisualizerStyle'")))
             {
                 return;
             }
         }
 
-        if (CategoryStr == TEXT("LogStats")) 
+        if (CategoryStr == TEXT("LogStats"))
         {
-             // "There is no thread with id" is noise during stat commands
              if (FString(V).Contains(TEXT("There is no thread with id")))
              {
                  return;
@@ -70,26 +106,43 @@ public:
         FString Message = FString(V);
         FString CategoryString = Category.ToString();
 
-        // Dispatch to game thread to ensure safe socket sending if not already there
-        // Actually, SendRawMessage might be thread safe, but let's be safe.
-        // Copy data for lambda capture
-        const FString PayloadJson = FString::Printf(TEXT("{\"event\":\"log\",\"category\":\"%s\",\"verbosity\":\"%s\",\"message\":\"%s\"}"), 
-            *CategoryString, *VerbosityString, *Message.ReplaceCharWithEscapedChar());
-
-        // Use a weak pointer to the subsystem to avoid crashing if it's destroyed
-        TWeakObjectPtr<UMcpAutomationBridgeSubsystem> WeakSubsystem(Subsystem);
-
-        AsyncTask(ENamedThreads::GameThread, [WeakSubsystem, PayloadJson]()
+        // Store in ring buffer
         {
-            if (UMcpAutomationBridgeSubsystem* StrongSubsystem = WeakSubsystem.Get())
+            FScopeLock Lock(&RingBufferLock);
+            FMcpLogEntry& Entry = LogRingBuffer[RingWriteIndex % MaxRingBufferSize];
+            Entry.Category = CategoryString;
+            Entry.Verbosity = VerbosityString;
+            Entry.Message = Message;
+            Entry.Timestamp = FPlatformTime::Seconds();
+            RingWriteIndex = (RingWriteIndex + 1) % MaxRingBufferSize;
+            ++TotalWritten;
+        }
+
+        // Stream to connected sockets only if explicitly enabled (subscribe action)
+        if (bStreamingEnabled)
+        {
+            const FString PayloadJson = FString::Printf(TEXT("{\"event\":\"log\",\"category\":\"%s\",\"verbosity\":\"%s\",\"message\":\"%s\"}"),
+                *CategoryString, *VerbosityString, *Message.ReplaceCharWithEscapedChar());
+
+            TWeakObjectPtr<UMcpAutomationBridgeSubsystem> WeakSubsystem(Subsystem);
+
+            AsyncTask(ENamedThreads::GameThread, [WeakSubsystem, PayloadJson]()
             {
-               StrongSubsystem->SendRawMessage(PayloadJson);
-            }
-        });
+                if (UMcpAutomationBridgeSubsystem* StrongSubsystem = WeakSubsystem.Get())
+                {
+                   StrongSubsystem->SendRawMessage(PayloadJson);
+                }
+            });
+        }
     }
 
 private:
     UMcpAutomationBridgeSubsystem* Subsystem;
+    bool bStreamingEnabled;
+    mutable FCriticalSection RingBufferLock;
+    TArray<FMcpLogEntry> LogRingBuffer;
+    int32 RingWriteIndex;
+    uint64 TotalWritten;
 };
 
 bool UMcpAutomationBridgeSubsystem::HandleLogAction(const FString& RequestId, const FString& Action, const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> RequestingSocket)
@@ -111,9 +164,14 @@ bool UMcpAutomationBridgeSubsystem::HandleLogAction(const FString& RequestId, co
     {
         if (!LogCaptureDevice.IsValid())
         {
-            LogCaptureDevice = MakeShared<FMcpLogOutputDevice>(this);
+            LogCaptureDevice = MakeShared<FMcpLogOutputDevice>(this, /*bEnableStreaming=*/true);
             GLog->AddOutputDevice(LogCaptureDevice.Get());
             UE_LOG(LogMcpAutomationBridgeSubsystem, Display, TEXT("Log streaming enabled by client request."));
+        }
+        else
+        {
+            // Device already exists (maybe from read auto-subscribe), enable streaming
+            static_cast<FMcpLogOutputDevice*>(LogCaptureDevice.Get())->SetStreamingEnabled(true);
         }
 
         TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
@@ -137,7 +195,51 @@ bool UMcpAutomationBridgeSubsystem::HandleLogAction(const FString& RequestId, co
         SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Unsubscribed from editor logs."), Result);
         return true;
     }
+    else if (SubAction == TEXT("read") || SubAction == TEXT("read_log") || SubAction == TEXT("get_log"))
+    {
+        // Ensure the log capture device exists (auto-subscribe for capture only, no streaming)
+        if (!LogCaptureDevice.IsValid())
+        {
+            LogCaptureDevice = MakeShared<FMcpLogOutputDevice>(this, /*bEnableStreaming=*/false);
+            GLog->AddOutputDevice(LogCaptureDevice.Get());
+        }
 
-    SendAutomationError(RequestingSocket, RequestId, TEXT("Unknown subAction."), TEXT("INVALID_SUBACTION"));
+        int32 Count = 100;
+        if (Payload->HasField(TEXT("count")))
+        {
+            Count = static_cast<int32>(Payload->GetNumberField(TEXT("count")));
+        }
+        Count = FMath::Clamp(Count, 1, 2000);
+
+        FString CategoryFilter;
+        Payload->TryGetStringField(TEXT("category"), CategoryFilter);
+        FString VerbosityFilter;
+        Payload->TryGetStringField(TEXT("verbosity"), VerbosityFilter);
+
+        FMcpLogOutputDevice* Device = static_cast<FMcpLogOutputDevice*>(LogCaptureDevice.Get());
+        TArray<FMcpLogEntry> Entries = Device->ReadRecentLogs(Count, CategoryFilter, VerbosityFilter);
+
+        TArray<TSharedPtr<FJsonValue>> LogArray;
+        for (const FMcpLogEntry& Entry : Entries)
+        {
+            TSharedPtr<FJsonObject> EntryObj = MakeShared<FJsonObject>();
+            EntryObj->SetStringField(TEXT("category"), Entry.Category);
+            EntryObj->SetStringField(TEXT("verbosity"), Entry.Verbosity);
+            EntryObj->SetStringField(TEXT("message"), Entry.Message);
+            EntryObj->SetNumberField(TEXT("timestamp"), Entry.Timestamp);
+            LogArray.Add(MakeShared<FJsonValueObject>(EntryObj));
+        }
+
+        TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+        Result->SetStringField(TEXT("action"), TEXT("read"));
+        Result->SetArrayField(TEXT("logs"), LogArray);
+        Result->SetNumberField(TEXT("count"), LogArray.Num());
+        Result->SetNumberField(TEXT("requested"), Count);
+        SendAutomationResponse(RequestingSocket, RequestId, true,
+            FString::Printf(TEXT("Retrieved %d log entries"), LogArray.Num()), Result);
+        return true;
+    }
+
+    SendAutomationError(RequestingSocket, RequestId, TEXT("Unknown subAction. Valid: subscribe, unsubscribe, read"), TEXT("INVALID_SUBACTION"));
     return true;
 }

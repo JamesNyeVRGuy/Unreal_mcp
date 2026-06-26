@@ -12,6 +12,7 @@
 #include "McpAutomationBridgeHelpers.h"
 #include "McpBridgeWebSocket.h"
 #include "Misc/EngineVersionComparison.h"
+#include "Misc/PackageName.h"
 
 #if WITH_EDITOR
 #include "Editor.h"
@@ -167,9 +168,11 @@ namespace GameFrameworkHelpers
             return nullptr;
         }
 
-        // Ensure path starts with /Game/
+        // Resolve path -- support plugin mount points (e.g. /Canopy/)
         FString FullPath = Path;
-        if (!FullPath.StartsWith(TEXT("/Game/")))
+        if (!FullPath.StartsWith(TEXT("/Game/")) &&
+            !FullPath.StartsWith(TEXT("/Engine/")) &&
+            !FullPath.StartsWith(TEXT("/Script/")))
         {
             if (FullPath.StartsWith(TEXT("/Content/")))
             {
@@ -178,6 +181,15 @@ namespace GameFrameworkHelpers
             else if (!FullPath.StartsWith(TEXT("/")))
             {
                 FullPath = TEXT("/Game/") + FullPath;
+            }
+            else
+            {
+                // Check if this is a valid mount point (e.g. /Canopy/)
+                FText MountReason;
+                if (!FPackageName::IsValidLongPackageName(FullPath / TEXT("DummyAsset"), false, &MountReason))
+                {
+                    FullPath = TEXT("/Game/") + FullPath;
+                }
             }
         }
         

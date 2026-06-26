@@ -5799,6 +5799,145 @@ bool UMcpAutomationBridgeSubsystem::HandleSCSAction(
     return true;
   }
 
+  // Set a default value on a component subobject of the Blueprint's CDO.
+  // Works for BOTH native (CreateDefaultSubobject) components -- which live as
+  // real subobjects on the generated-class CDO and are unreachable via
+  // set_scs_property -- and SCS-added components (falls back to the SCS template).
+  // Reuses the proven set_default persistence tail (ApplyJsonValueToProperty +
+  // structural-modify + compile + save), and supports dotted nested property
+  // paths within the component.
+  if (ActionMatchesPattern(TEXT("set_component_default"))) {
+#if WITH_EDITOR
+    UBlueprint *Blueprint = ResolveBlueprint();
+    if (!Blueprint || !Blueprint->GeneratedClass) {
+      SendAutomationResponse(RequestingSocket, RequestId, false,
+                             TEXT("set_component_default requires a valid blueprint"),
+                             nullptr, TEXT("INVALID_BLUEPRINT"));
+      return true;
+    }
+
+    FString ComponentName;
+    FString PropertyName;
+    Payload->TryGetStringField(TEXT("componentName"), ComponentName);
+    Payload->TryGetStringField(TEXT("propertyName"), PropertyName);
+    TSharedPtr<FJsonValue> ValueField = Payload->TryGetField(TEXT("value"));
+    if (ComponentName.IsEmpty() || PropertyName.IsEmpty() || !ValueField.IsValid()) {
+      SendAutomationResponse(RequestingSocket, RequestId, false,
+                             TEXT("set_component_default requires componentName, propertyName, and value"),
+                             nullptr, TEXT("INVALID_ARGUMENT"));
+      return true;
+    }
+
+    UObject *CDO = Blueprint->GeneratedClass->GetDefaultObject();
+    if (!CDO) {
+      SendAutomationResponse(RequestingSocket, RequestId, false,
+                             TEXT("Could not get CDO"), nullptr, TEXT("INVALID_BLUEPRINT"));
+      return true;
+    }
+
+    // Locate the component subobject. Native components are present on the CDO
+    // (the archetype instances are constructed from); SCS components are found
+    // via their node template.
+    UObject *TargetComponent = nullptr;
+    if (AActor *CDOActor = Cast<AActor>(CDO)) {
+      TArray<UActorComponent *> Components;
+      CDOActor->GetComponents(Components);
+      for (UActorComponent *Comp : Components) {
+        if (Comp && Comp->GetName() == ComponentName) {
+          TargetComponent = Comp;
+          break;
+        }
+      }
+    }
+    if (!TargetComponent && Blueprint->SimpleConstructionScript) {
+      for (USCS_Node *Node : Blueprint->SimpleConstructionScript->GetAllNodes()) {
+        if (Node && Node->GetVariableName().IsValid() &&
+            Node->GetVariableName().ToString() == ComponentName) {
+          TargetComponent = Node->ComponentTemplate;
+          break;
+        }
+      }
+    }
+    if (!TargetComponent) {
+      SendAutomationResponse(
+          RequestingSocket, RequestId, false,
+          FString::Printf(TEXT("Component '%s' not found on %s (checked CDO subobjects and SCS)"),
+                          *ComponentName, *Blueprint->GetName()),
+          nullptr, TEXT("COMPONENT_NOT_FOUND"));
+      return true;
+    }
+
+    // Resolve the property (supports dotted nested paths into structs).
+    void *TargetContainer = nullptr;
+    FProperty *Property = nullptr;
+    FString ResolveError;
+    if (PropertyName.Contains(TEXT("."))) {
+      Property = ResolveNestedPropertyPath(TargetComponent, PropertyName, TargetContainer, ResolveError);
+    } else {
+      TargetContainer = TargetComponent;
+      Property = TargetComponent->GetClass()->FindPropertyByName(FName(*PropertyName));
+      if (!Property) {
+        ResolveError = FString::Printf(TEXT("Property '%s' not found on component '%s'"),
+                                       *PropertyName, *ComponentName);
+      }
+    }
+    if (!Property || !TargetContainer) {
+      SendAutomationResponse(RequestingSocket, RequestId, false,
+                             ResolveError.IsEmpty() ? TEXT("Property not found") : ResolveError,
+                             nullptr, TEXT("PROPERTY_NOT_FOUND"));
+      return true;
+    }
+
+    Blueprint->Modify();
+    CDO->Modify();
+    TargetComponent->Modify();
+
+    FString ConversionError;
+    if (!ApplyJsonValueToProperty(TargetContainer, Property, ValueField, ConversionError)) {
+      SendAutomationResponse(RequestingSocket, RequestId, false, ConversionError,
+                             nullptr, TEXT("CONVERSION_FAILED"));
+      return true;
+    }
+
+    const TSharedPtr<FJsonValue> CurrentValue = ExportPropertyToJsonValue(TargetContainer, Property);
+
+    // Propagate to live archetype instances that haven't overridden this value,
+    // so any already-spawned characters in an open PIE/editor world pick it up.
+    {
+      TArray<UObject *> Instances;
+      TargetComponent->GetArchetypeInstances(Instances);
+      for (UObject *Inst : Instances) {
+        if (Inst) {
+          Inst->Modify();
+        }
+      }
+    }
+
+    FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+    McpSafeCompileBlueprint(Blueprint);
+    const bool bSaved = SaveLoadedAssetThrottled(Blueprint);
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("componentName"), ComponentName);
+    Result->SetStringField(TEXT("propertyName"), PropertyName);
+    Result->SetBoolField(TEXT("saved"), bSaved);
+    if (CurrentValue.IsValid()) {
+      Result->SetField(TEXT("value"), CurrentValue);
+    }
+    AddAssetVerification(Result, Blueprint);
+    SendAutomationResponse(RequestingSocket, RequestId, true,
+                           FString::Printf(TEXT("Set %s.%s on %s"),
+                                           *ComponentName, *PropertyName, *Blueprint->GetName()),
+                           Result);
+    return true;
+#else
+    SendAutomationResponse(RequestingSocket, RequestId, false,
+                           TEXT("set_component_default requires editor build"),
+                           nullptr, TEXT("NOT_AVAILABLE"));
+    return true;
+#endif
+  }
+
   // Set SCS property (simplified implementation)
   if (ActionMatchesPattern(TEXT("set_scs_property"))) {
     UBlueprint *Blueprint = ResolveBlueprint();

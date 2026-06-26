@@ -370,6 +370,31 @@ export async function handleInspectTools(action: string, args: HandlerArgs, tool
       return cleanObject(res);
     }
 
+    case 'set_map_entry':
+    case 'add_map_entry':
+    case 'remove_map_entry':
+    case 'list_map_entries': {
+      const objectPath = await resolveObjectPath(args, tools);
+      if (!objectPath) {
+        throw new Error('Invalid objectPath: must be a non-empty string');
+      }
+      const params = normalizeArgs(args, [
+        { key: 'propertyName', aliases: ['propertyPath'], required: action !== 'list_map_entries' ? true : true },
+        { key: 'key' },
+        { key: 'value' }
+      ]);
+      const propertyName = extractString(params, 'propertyName');
+      const payload: Record<string, unknown> = {
+        action,
+        objectPath,
+        propertyName,
+      };
+      if (params.key !== undefined) payload.key = params.key;
+      if (params.value !== undefined) payload.value = params.value;
+      const res = await executeAutomationRequest(tools, 'inspect', payload) as InspectResponse;
+      return cleanObject(res);
+    }
+
     case 'get_components': {
       const actorName = await resolveObjectPath(args, tools, { pathKeys: [], actorKeys: ['actorName', 'name', 'objectPath'] });
       if (!actorName) {
@@ -488,16 +513,51 @@ export async function handleInspectTools(action: string, args: HandlerArgs, tool
       }) as Record<string, unknown>);
     }
     case 'export': {
-      const actorName = await resolveObjectPath(args, tools);
-      if (!actorName) throw new Error('actorName may be required for export depending on context (exporting actor requires it)');
+      const objectPath = await resolveObjectPath(args, tools);
+      if (!objectPath) throw new Error('objectPath or actorName is required for export');
       const params = normalizeArgs(args, [
         { key: 'destinationPath', aliases: ['outputPath'] }
       ]);
       const destinationPath = extractOptionalString(params, 'destinationPath');
+
+      // If objectPath looks like an asset path (contains /), route to inspect handler
+      // which supports any UObject. Otherwise treat as actor name for control_actor.
+      if (objectPath.includes('/')) {
+        return cleanObject(await executeAutomationRequest(tools, 'inspect', {
+          action: 'export',
+          objectPath,
+        }) as Record<string, unknown>);
+      }
       return cleanObject(await executeAutomationRequest(tools, 'control_actor', {
         action: 'export',
-        actorName: actorName || '',
+        actorName: objectPath,
         destinationPath
+      }) as Record<string, unknown>);
+    }
+    case 'call_function': {
+      const objectPath = await resolveObjectPath(normalizedArgs, tools);
+      if (!objectPath) throw new Error('objectPath is required for call_function');
+      const params = normalizeArgs(args, [
+        { key: 'functionName', aliases: ['function_name'], required: true },
+        { key: 'arguments', aliases: ['args'] }
+      ]);
+      const functionName = extractString(params, 'functionName');
+
+      // If objectPath looks like an asset path, route to inspect handler (any UObject)
+      if (objectPath.includes('/')) {
+        return cleanObject(await executeAutomationRequest(tools, 'inspect', {
+          action: 'call_function',
+          objectPath,
+          functionName,
+          arguments: params.arguments
+        }) as Record<string, unknown>);
+      }
+      // Otherwise treat as actor name
+      return cleanObject(await executeAutomationRequest(tools, 'control_actor', {
+        action: 'call_function',
+        actorName: objectPath,
+        functionName,
+        arguments: params.arguments
       }) as Record<string, unknown>);
     }
     case 'delete_object': {

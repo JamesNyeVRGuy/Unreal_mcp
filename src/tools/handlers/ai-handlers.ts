@@ -160,7 +160,9 @@ export async function handleAITools(
 
     case 'configure_test_scoring': {
       requireNonEmptyString(argsRecord.queryPath, 'queryPath', 'Missing required parameter: queryPath');
-      requireNonEmptyString(argsRecord.testIndex, 'testIndex', 'Missing required parameter: testIndex');
+      if (argsRecord.testIndex === undefined || argsRecord.testIndex === null) {
+        throw new Error('Missing required parameter: testIndex');
+      }
       return sendRequest('configure_test_scoring');
     }
 
@@ -211,14 +213,64 @@ export async function handleAITools(
     case 'add_state_tree_transition': {
       requireNonEmptyString(argsRecord.stateTreePath, 'stateTreePath', 'Missing required parameter: stateTreePath');
       requireNonEmptyString(argsRecord.fromState, 'fromState', 'Missing required parameter: fromState');
-      requireNonEmptyString(argsRecord.toState, 'toState', 'Missing required parameter: toState');
+      // toState is required only when transitionType is GotoState (the default).
+      // Succeeded / Failed / NextState / NextSelectableState / None ignore toState.
+      const transitionType = typeof argsRecord.transitionType === 'string'
+        ? argsRecord.transitionType
+        : 'GotoState';
+      if (transitionType === 'GotoState') {
+        requireNonEmptyString(argsRecord.toState, 'toState', 'Missing required parameter: toState (required when transitionType is GotoState)');
+      }
       return sendRequest('add_state_tree_transition');
+    }
+
+    case 'remove_state_tree_transition': {
+      requireNonEmptyString(argsRecord.stateTreePath, 'stateTreePath', 'Missing required parameter: stateTreePath');
+      requireNonEmptyString(argsRecord.fromState, 'fromState', 'Missing required parameter: fromState');
+      // transitionId is optional - if omitted and the state has exactly one transition,
+      // that one is removed; otherwise the C++ side returns AMBIGUOUS with the GUID list.
+      return sendRequest('remove_state_tree_transition');
     }
 
     case 'configure_state_tree_task': {
       requireNonEmptyString(argsRecord.stateTreePath, 'stateTreePath', 'Missing required parameter: stateTreePath');
       requireNonEmptyString(argsRecord.stateName, 'stateName', 'Missing required parameter: stateName');
       return sendRequest('configure_state_tree_task');
+    }
+
+    case 'add_state_tree_task': {
+      requireNonEmptyString(argsRecord.stateTreePath, 'stateTreePath', 'Missing required parameter: stateTreePath');
+      requireNonEmptyString(argsRecord.stateName, 'stateName', 'Missing required parameter: stateName');
+      requireNonEmptyString(argsRecord.taskStructName, 'taskStructName', 'Missing required parameter: taskStructName');
+      return sendRequest('add_state_tree_task');
+    }
+
+    case 'remove_state_tree_task': {
+      requireNonEmptyString(argsRecord.stateTreePath, 'stateTreePath', 'Missing required parameter: stateTreePath');
+      requireNonEmptyString(argsRecord.stateName, 'stateName', 'Missing required parameter: stateName');
+      // taskStructName or taskIndex required (validated C++ side)
+      return sendRequest('remove_state_tree_task');
+    }
+
+    case 'set_state_tree_schema': {
+      requireNonEmptyString(argsRecord.stateTreePath, 'stateTreePath', 'Missing required parameter: stateTreePath');
+      requireNonEmptyString(argsRecord.schemaClass, 'schemaClass', 'Missing required parameter: schemaClass');
+      return sendRequest('set_state_tree_schema');
+    }
+
+    case 'compile_state_tree': {
+      requireNonEmptyString(argsRecord.stateTreePath, 'stateTreePath', 'Missing required parameter: stateTreePath');
+      return sendRequest('compile_state_tree');
+    }
+
+    case 'add_state_tree_binding': {
+      requireNonEmptyString(argsRecord.stateTreePath, 'stateTreePath', 'Missing required parameter: stateTreePath');
+      requireNonEmptyString(argsRecord.stateName, 'stateName', 'Missing required parameter: stateName');
+      requireNonEmptyString(argsRecord.sourcePropertyPath, 'sourcePropertyPath', 'Missing required parameter: sourcePropertyPath');
+      requireNonEmptyString(argsRecord.targetPropertyPath, 'targetPropertyPath', 'Missing required parameter: targetPropertyPath');
+      // sourceTaskStruct or sourceTaskIndex required (validated C++ side)
+      // targetTaskStruct or targetTaskIndex required (validated C++ side)
+      return sendRequest('add_state_tree_binding');
     }
 
     // =========================================================================
@@ -282,6 +334,11 @@ export async function handleAITools(
         });
       }
       return sendRequest('get_ai_info');
+    }
+
+    case 'get_state_tree_info': {
+      requireNonEmptyString(argsRecord.stateTreePath, 'stateTreePath', 'Missing required parameter: stateTreePath');
+      return sendRequest('get_state_tree_info');
     }
 
     // =========================================================================

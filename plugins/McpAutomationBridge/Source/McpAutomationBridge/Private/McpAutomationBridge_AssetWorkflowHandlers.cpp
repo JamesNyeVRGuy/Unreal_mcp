@@ -7,6 +7,7 @@
 #include "McpAutomationBridgeHelpers.h"
 #include "McpAutomationBridgeSubsystem.h"
 #include "Misc/EngineVersionComparison.h"
+#include "UObject/ObjectRedirector.h"
 #include "Misc/ScopeExit.h"
 #include "UObject/MetaData.h"
 
@@ -140,6 +141,165 @@ bool UMcpAutomationBridgeSubsystem::HandleAssetAction(
     return HandleGetMaterialNodeDetails(RequestId, Action, Payload, RequestingSocket);
   if (Lower == TEXT("rebuild_material"))
     return HandleRebuildMaterial(RequestId, Action, Payload, RequestingSocket);
+
+  // --- Batch import from disk ---
+  if (Lower == TEXT("batch_import"))
+  {
+#if WITH_EDITOR
+    const TArray<TSharedPtr<FJsonValue>>* FilesArray = nullptr;
+    if (!Payload->TryGetArrayField(TEXT("files"), FilesArray) || !FilesArray || FilesArray->Num() == 0)
+    {
+      SendAutomationResponse(RequestingSocket, RequestId, false,
+                             TEXT("files array is required (each entry: {sourcePath, destinationPath})"),
+                             nullptr, TEXT("INVALID_ARGUMENT"));
+      return true;
+    }
+
+    FString DefaultDestination;
+    Payload->TryGetStringField(TEXT("destinationPath"), DefaultDestination);
+
+    // Collect all import jobs
+    struct FImportJob { FString SourcePath; FString DestPath; FString DestName; };
+    TArray<FImportJob> Jobs;
+    TArray<FString> Errors;
+
+    for (int32 i = 0; i < FilesArray->Num(); ++i)
+    {
+      const TSharedPtr<FJsonValue>& Val = (*FilesArray)[i];
+      FString SourcePath;
+      FString DestinationPath;
+
+      if (Val->Type == EJson::String)
+      {
+        // Simple string: just the source path, use default destination
+        SourcePath = Val->AsString();
+        DestinationPath = DefaultDestination;
+      }
+      else if (Val->Type == EJson::Object)
+      {
+        TSharedPtr<FJsonObject> FileObj = Val->AsObject();
+        FileObj->TryGetStringField(TEXT("sourcePath"), SourcePath);
+        FileObj->TryGetStringField(TEXT("destinationPath"), DestinationPath);
+        if (DestinationPath.IsEmpty())
+          DestinationPath = DefaultDestination;
+      }
+
+      if (SourcePath.IsEmpty() || DestinationPath.IsEmpty())
+      {
+        Errors.Add(FString::Printf(TEXT("files[%d]: sourcePath and destinationPath required"), i));
+        continue;
+      }
+
+      if (!FPaths::FileExists(SourcePath))
+      {
+        Errors.Add(FString::Printf(TEXT("files[%d]: source not found: %s"), i, *SourcePath));
+        continue;
+      }
+
+      FString SafeDestPath = SanitizeProjectRelativePath(DestinationPath);
+      if (SafeDestPath.IsEmpty())
+      {
+        Errors.Add(FString::Printf(TEXT("files[%d]: invalid destination: %s"), i, *DestinationPath));
+        continue;
+      }
+
+      FImportJob Job;
+      Job.SourcePath = SourcePath;
+      if (FPaths::GetExtension(SafeDestPath).IsEmpty())
+      {
+        Job.DestPath = SafeDestPath;
+        Job.DestName = FPaths::GetBaseFilename(SourcePath);
+      }
+      else
+      {
+        Job.DestPath = FPaths::GetPath(SafeDestPath);
+        Job.DestName = FPaths::GetBaseFilename(SafeDestPath);
+      }
+      Job.DestName.ReplaceInline(TEXT(" "), TEXT("_"));
+      Job.DestName.ReplaceInline(TEXT("."), TEXT("_"));
+      Jobs.Add(MoveTemp(Job));
+    }
+
+    if (Jobs.Num() == 0)
+    {
+      TSharedPtr<FJsonObject> ErrResult = MakeShared<FJsonObject>();
+      TArray<TSharedPtr<FJsonValue>> ErrArr;
+      for (const FString& E : Errors)
+        ErrArr.Add(MakeShared<FJsonValueString>(E));
+      ErrResult->SetArrayField(TEXT("errors"), ErrArr);
+      SendAutomationResponse(RequestingSocket, RequestId, false,
+                             TEXT("No valid import jobs"), ErrResult, TEXT("INVALID_ARGUMENT"));
+      return true;
+    }
+
+    // Defer to next tick (same pattern as single import)
+    TWeakObjectPtr<UMcpAutomationBridgeSubsystem> WeakThis(this);
+    GEditor->GetTimerManager()->SetTimerForNextTick(
+        [WeakThis, RequestId, Jobs, Errors, Socket = RequestingSocket]() {
+          UMcpAutomationBridgeSubsystem* StrongThis = WeakThis.Get();
+          if (!StrongThis) return;
+
+          IAssetTools& AssetTools =
+              FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools").Get();
+
+          TArray<TSharedPtr<FJsonValue>> ImportedArr;
+          TArray<FString> MutableErrors = Errors;
+
+          for (const FImportJob& Job : Jobs)
+          {
+            TArray<FString> Files;
+            Files.Add(Job.SourcePath);
+
+            UAutomatedAssetImportData* ImportData = NewObject<UAutomatedAssetImportData>();
+            ImportData->bReplaceExisting = true;
+            ImportData->DestinationPath = Job.DestPath;
+            ImportData->Filenames = Files;
+
+            TArray<UObject*> Imported = AssetTools.ImportAssetsAutomated(ImportData);
+            UObject* Asset = nullptr;
+            for (UObject* Obj : Imported)
+            {
+              if (Obj) { Asset = Obj; break; }
+            }
+
+            if (Asset)
+            {
+              TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+              Entry->SetStringField(TEXT("sourcePath"), Job.SourcePath);
+              Entry->SetStringField(TEXT("assetPath"), Asset->GetPathName());
+              Entry->SetStringField(TEXT("assetName"), Asset->GetName());
+              Entry->SetStringField(TEXT("assetClass"), Asset->GetClass()->GetName());
+              ImportedArr.Add(MakeShared<FJsonValueObject>(Entry));
+            }
+            else
+            {
+              MutableErrors.Add(FString::Printf(TEXT("Import failed: %s"), *Job.SourcePath));
+            }
+          }
+
+          TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+          Result->SetNumberField(TEXT("importedCount"), ImportedArr.Num());
+          Result->SetNumberField(TEXT("totalRequested"), Jobs.Num());
+          Result->SetArrayField(TEXT("imported"), ImportedArr);
+          if (MutableErrors.Num() > 0)
+          {
+            TArray<TSharedPtr<FJsonValue>> ErrArr;
+            for (const FString& E : MutableErrors)
+              ErrArr.Add(MakeShared<FJsonValueString>(E));
+            Result->SetArrayField(TEXT("errors"), ErrArr);
+          }
+
+          StrongThis->SendAutomationResponse(Socket, RequestId, ImportedArr.Num() > 0,
+              FString::Printf(TEXT("Imported %d of %d assets"), ImportedArr.Num(), Jobs.Num()), Result);
+        });
+
+    return true;
+#else
+    SendAutomationResponse(RequestingSocket, RequestId, false,
+                           TEXT("Batch import requires editor build"), nullptr, TEXT("NOT_IMPLEMENTED"));
+    return true;
+#endif
+  }
 
   return false;
 }
@@ -1594,6 +1754,43 @@ bool UMcpAutomationBridgeSubsystem::HandleDuplicateAsset(
 #endif
 }
 
+// Helper: Make asset file(s) writable so deletion/rename succeeds under source control.
+// For a single asset, resolves the .uasset path. For a directory, iterates all files.
+static void MakeAssetFilesWritable(const FString& AssetPath)
+{
+  IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
+
+  // Try as single asset first
+  FString FilePath;
+  FString PackageName = FPackageName::ObjectPathToPackageName(AssetPath);
+  if (FPackageName::TryConvertLongPackageNameToFilename(
+          PackageName, FilePath, FPackageName::GetAssetPackageExtension()))
+  {
+    if (PlatformFile.FileExists(*FilePath) && PlatformFile.IsReadOnly(*FilePath))
+    {
+      PlatformFile.SetReadOnly(*FilePath, false);
+    }
+  }
+
+  // Also try as directory - make all files within writable
+  FString DirPath;
+  if (FPackageName::TryConvertLongPackageNameToFilename(PackageName, DirPath))
+  {
+    if (PlatformFile.DirectoryExists(*DirPath))
+    {
+      PlatformFile.IterateDirectoryRecursively(*DirPath,
+        [&PlatformFile](const TCHAR* Filename, bool bIsDirectory) -> bool
+        {
+          if (!bIsDirectory && PlatformFile.IsReadOnly(Filename))
+          {
+            PlatformFile.SetReadOnly(Filename, false);
+          }
+          return true; // continue iteration
+        });
+    }
+  }
+}
+
 /**
  * Handles asset renaming (and moving) requests.
  *
@@ -1648,18 +1845,56 @@ bool UMcpAutomationBridgeSubsystem::HandleRenameAsset(
     return true;
   }
 
+  // Make source file writable (source control may mark it read-only)
+  MakeAssetFilesWritable(ResolvedSourcePath);
+
   // Use the resolved path for the rename operation
   if (UEditorAssetLibrary::RenameAsset(ResolvedSourcePath, DestinationPath)) {
+    // Fix up redirectors left at the source path.
+    // RenameAsset creates a redirector at the old location; if not cleaned up,
+    // subsequent operations on assets moved to new paths fail silently
+    // (FindObject finds stale in-memory objects instead of the moved asset).
+    {
+      FString SourceDir = FPaths::GetPath(ResolvedSourcePath);
+      if (SourceDir.IsEmpty()) SourceDir = TEXT("/Game");
+
+      FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+      IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
+
+      // Find redirectors in the source directory
+      TArray<UObjectRedirector*> Redirectors;
+      TArray<FAssetData> Assets;
+      AssetRegistry.GetAssetsByPath(FName(*SourceDir), Assets, false);
+      for (const FAssetData& Asset : Assets)
+      {
+        if (Asset.IsRedirector())
+        {
+          if (UObjectRedirector* Redirector = Cast<UObjectRedirector>(Asset.GetAsset()))
+          {
+            Redirectors.Add(Redirector);
+          }
+        }
+      }
+
+      if (Redirectors.Num() > 0)
+      {
+        FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
+        AssetToolsModule.Get().FixupReferencers(Redirectors);
+        UE_LOG(LogMcpAutomationBridgeSubsystem, Log,
+               TEXT("HandleRenameAsset: Fixed up %d redirector(s) at %s"), Redirectors.Num(), *SourceDir);
+      }
+    }
+
     TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
     Resp->SetBoolField(TEXT("success"), true);
     Resp->SetStringField(TEXT("assetPath"), DestinationPath);
-    
+
     // Add verification data
     UObject* RenamedAsset = UEditorAssetLibrary::LoadAsset(DestinationPath);
     if (RenamedAsset) {
       AddAssetVerification(Resp, RenamedAsset);
     }
-    
+
     SendAutomationResponse(Socket, RequestId, true, TEXT("Asset renamed"), Resp,
                            FString());
   } else {
@@ -1728,6 +1963,8 @@ bool UMcpAutomationBridgeSubsystem::HandleDeleteAssets(
     // UEditorAssetLibrary::DoesDirectoryExist() uses AssetRegistry cache which may
     // contain stale entries. We need to check if the directory ACTUALLY exists on disk.
     if (DoesAssetDirectoryExistOnDisk(Path)) {
+      // Make files writable (source control may mark them read-only)
+      MakeAssetFilesWritable(Path);
       // Directory exists on disk - attempt to delete it
       if (UEditorAssetLibrary::DeleteDirectory(Path)) {
         // CRITICAL FIX: Verify the directory was actually deleted
@@ -1742,6 +1979,8 @@ bool UMcpAutomationBridgeSubsystem::HandleDeleteAssets(
         FailedToDeletePaths.Add(Path);
       }
     } else if (UEditorAssetLibrary::DoesAssetExist(Path)) {
+      // Make file writable (source control may mark it read-only)
+      MakeAssetFilesWritable(Path);
       // Asset exists - attempt to delete it
       if (UEditorAssetLibrary::DeleteAsset(Path)) {
         // CRITICAL FIX: Verify the asset was actually deleted

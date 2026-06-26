@@ -472,16 +472,18 @@ export async function handleMaterialAuthoringTools(
                          extractOptionalString(rawArgs, 'toPin') ?? 
                          extractOptionalString(rawArgs, 'inputName') ?? '';
         
-        // If node IDs not provided, use pin names as identifiers
+        // If source node ID not provided, use source pin name as identifier.
+        // Target node ID must NOT fall back to pin name -- an empty targetNodeId
+        // tells the C++ bridge to connect to the main material node (BaseColor,
+        // EmissiveColor, etc.) rather than searching for an expression by name.
         const effectiveSourceId = sourceNodeId || sourcePin;
-        const effectiveTargetId = targetNodeId || targetPin;
-        
+
         const res = (await executeAutomationRequest(tools, TOOL_ACTIONS.MANAGE_MATERIAL_AUTHORING, {
           subAction: 'connect_nodes',
           assetPath,
           sourceNodeId: effectiveSourceId,
           sourcePin,
-          targetNodeId: effectiveTargetId,
+          targetNodeId,
           inputName: targetPin,
         })) as AutomationResponse;
 

@@ -2785,6 +2785,184 @@ static TSharedPtr<FJsonObject> HandleAnimationAuthoringRequest(const TSharedPtr<
         return Response;
     }
     
+    // ----------------------------------------------------------------
+    // AnimBP graph introspection (read-only)
+    // ----------------------------------------------------------------
+    if (SubAction == TEXT("list_anim_state_machines"))
+    {
+#if MCP_HAS_ANIM_STATE_MACHINE_GRAPH && MCP_HAS_ANIM_STATE_MACHINE_SCHEMA
+        FString AnimBpPath = NormalizeAnimPath(GetStringFieldAnimAuth(Params, TEXT("assetPath"), GetStringFieldAnimAuth(Params, TEXT("animBpPath"), GetStringFieldAnimAuth(Params, TEXT("blueprintPath"), GetStringFieldAnimAuth(Params, TEXT("animPath"), TEXT(""))))));
+        UAnimBlueprint* AnimBP = Cast<UAnimBlueprint>(StaticLoadObject(UAnimBlueprint::StaticClass(), nullptr, *AnimBpPath));
+        if (!AnimBP) { ANIM_ERROR_RESPONSE(FString::Printf(TEXT("AnimBlueprint not found: %s"), *AnimBpPath), TEXT("ASSET_NOT_FOUND")); }
+
+        TArray<TSharedPtr<FJsonValue>> Machines;
+        for (UEdGraph* Graph : AnimBP->FunctionGraphs)
+        {
+            if (!Graph) continue;
+            for (UEdGraphNode* Node : Graph->Nodes)
+            {
+                if (UAnimGraphNode_StateMachine* SMNode = Cast<UAnimGraphNode_StateMachine>(Node))
+                {
+                    TSharedPtr<FJsonObject> M = MakeShared<FJsonObject>();
+                    M->SetStringField(TEXT("name"), SMNode->GetStateMachineName());
+                    M->SetStringField(TEXT("nodeId"), SMNode->NodeGuid.ToString());
+                    M->SetStringField(TEXT("parentGraph"), Graph->GetName());
+                    if (UAnimationStateMachineGraph* SMGraph = SMNode->EditorStateMachineGraph)
+                    {
+                        int32 StateCount = 0, TransitionCount = 0;
+                        for (UEdGraphNode* Inner : SMGraph->Nodes)
+                        {
+                            if (Cast<UAnimStateNode>(Inner)) StateCount++;
+                            else if (Cast<UAnimStateTransitionNode>(Inner)) TransitionCount++;
+                        }
+                        M->SetNumberField(TEXT("stateCount"), StateCount);
+                        M->SetNumberField(TEXT("transitionCount"), TransitionCount);
+                    }
+                    Machines.Add(MakeShared<FJsonValueObject>(M));
+                }
+            }
+        }
+        Response->SetArrayField(TEXT("stateMachines"), Machines);
+        Response->SetNumberField(TEXT("count"), Machines.Num());
+        ANIM_SUCCESS_RESPONSE(FString::Printf(TEXT("Found %d state machine(s) on %s"), Machines.Num(), *AnimBP->GetName()));
+        return Response;
+#else
+        ANIM_ERROR_RESPONSE(TEXT("State machine introspection requires AnimGraph plugin headers"), TEXT("UNSUPPORTED"));
+#endif
+    }
+
+    if (SubAction == TEXT("get_anim_state_machine"))
+    {
+#if MCP_HAS_ANIM_STATE_MACHINE_GRAPH && MCP_HAS_ANIM_STATE_MACHINE_SCHEMA
+        FString AnimBpPath = NormalizeAnimPath(GetStringFieldAnimAuth(Params, TEXT("assetPath"), GetStringFieldAnimAuth(Params, TEXT("animBpPath"), GetStringFieldAnimAuth(Params, TEXT("blueprintPath"), GetStringFieldAnimAuth(Params, TEXT("animPath"), TEXT(""))))));
+        FString MachineName = GetStringFieldAnimAuth(Params, TEXT("machineName"), TEXT(""));
+        UAnimBlueprint* AnimBP = Cast<UAnimBlueprint>(StaticLoadObject(UAnimBlueprint::StaticClass(), nullptr, *AnimBpPath));
+        if (!AnimBP) { ANIM_ERROR_RESPONSE(FString::Printf(TEXT("AnimBlueprint not found: %s"), *AnimBpPath), TEXT("ASSET_NOT_FOUND")); }
+        if (MachineName.IsEmpty()) { ANIM_ERROR_RESPONSE(TEXT("machineName required"), TEXT("INVALID_ARGUMENT")); }
+
+        UEdGraph* AnimGraph = GetAnimGraphFromBlueprint(AnimBP);
+        UAnimGraphNode_StateMachine* SMNode = FindStateMachineNode(AnimGraph, MachineName);
+        if (!SMNode || !SMNode->EditorStateMachineGraph)
+        {
+            ANIM_ERROR_RESPONSE(FString::Printf(TEXT("State machine '%s' not found"), *MachineName), TEXT("NOT_FOUND"));
+        }
+        UAnimationStateMachineGraph* SMGraph = SMNode->EditorStateMachineGraph;
+
+        TArray<TSharedPtr<FJsonValue>> States, Transitions;
+        for (UEdGraphNode* Node : SMGraph->Nodes)
+        {
+            if (UAnimStateNode* StateNode = Cast<UAnimStateNode>(Node))
+            {
+                TSharedPtr<FJsonObject> S = MakeShared<FJsonObject>();
+                S->SetStringField(TEXT("name"), StateNode->GetStateName());
+                S->SetStringField(TEXT("nodeId"), StateNode->NodeGuid.ToString());
+                States.Add(MakeShared<FJsonValueObject>(S));
+            }
+            else if (UAnimStateTransitionNode* TransNode = Cast<UAnimStateTransitionNode>(Node))
+            {
+                TSharedPtr<FJsonObject> T = MakeShared<FJsonObject>();
+                T->SetStringField(TEXT("nodeId"), TransNode->NodeGuid.ToString());
+                T->SetStringField(TEXT("fromState"), TransNode->GetPreviousState() ? TransNode->GetPreviousState()->GetStateName() : TEXT(""));
+                T->SetStringField(TEXT("toState"), TransNode->GetNextState() ? TransNode->GetNextState()->GetStateName() : TEXT(""));
+                T->SetNumberField(TEXT("priorityOrder"), TransNode->PriorityOrder);
+                T->SetBoolField(TEXT("bidirectional"), TransNode->Bidirectional);
+                Transitions.Add(MakeShared<FJsonValueObject>(T));
+            }
+        }
+        Response->SetStringField(TEXT("machineName"), MachineName);
+        Response->SetArrayField(TEXT("states"), States);
+        Response->SetArrayField(TEXT("transitions"), Transitions);
+        ANIM_SUCCESS_RESPONSE(FString::Printf(TEXT("State machine '%s' inspected: %d states, %d transitions"), *MachineName, States.Num(), Transitions.Num()));
+        return Response;
+#else
+        ANIM_ERROR_RESPONSE(TEXT("State machine introspection requires AnimGraph plugin headers"), TEXT("UNSUPPORTED"));
+#endif
+    }
+
+    if (SubAction == TEXT("get_anim_graph"))
+    {
+        FString AnimBpPath = NormalizeAnimPath(GetStringFieldAnimAuth(Params, TEXT("assetPath"), GetStringFieldAnimAuth(Params, TEXT("animBpPath"), GetStringFieldAnimAuth(Params, TEXT("blueprintPath"), GetStringFieldAnimAuth(Params, TEXT("animPath"), TEXT(""))))));
+        UAnimBlueprint* AnimBP = Cast<UAnimBlueprint>(StaticLoadObject(UAnimBlueprint::StaticClass(), nullptr, *AnimBpPath));
+        if (!AnimBP) { ANIM_ERROR_RESPONSE(FString::Printf(TEXT("AnimBlueprint not found: %s"), *AnimBpPath), TEXT("ASSET_NOT_FOUND")); }
+
+        TArray<TSharedPtr<FJsonValue>> Graphs;
+        for (UEdGraph* Graph : AnimBP->FunctionGraphs)
+        {
+            if (!Graph) continue;
+            TSharedPtr<FJsonObject> G = MakeShared<FJsonObject>();
+            G->SetStringField(TEXT("graphName"), Graph->GetName());
+            G->SetNumberField(TEXT("nodeCount"), Graph->Nodes.Num());
+
+            TArray<TSharedPtr<FJsonValue>> Nodes;
+            for (UEdGraphNode* Node : Graph->Nodes)
+            {
+                if (!Node) continue;
+                TSharedPtr<FJsonObject> N = MakeShared<FJsonObject>();
+                N->SetStringField(TEXT("nodeId"), Node->NodeGuid.ToString());
+                N->SetStringField(TEXT("nodeClass"), Node->GetClass()->GetName());
+                N->SetStringField(TEXT("title"), Node->GetNodeTitle(ENodeTitleType::ListView).ToString());
+                Nodes.Add(MakeShared<FJsonValueObject>(N));
+            }
+            G->SetArrayField(TEXT("nodes"), Nodes);
+            Graphs.Add(MakeShared<FJsonValueObject>(G));
+        }
+        Response->SetArrayField(TEXT("graphs"), Graphs);
+        Response->SetNumberField(TEXT("graphCount"), Graphs.Num());
+        ANIM_SUCCESS_RESPONSE(FString::Printf(TEXT("Dumped %d function graph(s) from %s"), Graphs.Num(), *AnimBP->GetName()));
+        return Response;
+    }
+
+    if (SubAction == TEXT("list_linked_anim_layers"))
+    {
+        FString AnimBpPath = NormalizeAnimPath(GetStringFieldAnimAuth(Params, TEXT("assetPath"), GetStringFieldAnimAuth(Params, TEXT("animBpPath"), GetStringFieldAnimAuth(Params, TEXT("blueprintPath"), GetStringFieldAnimAuth(Params, TEXT("animPath"), TEXT(""))))));
+        UAnimBlueprint* AnimBP = Cast<UAnimBlueprint>(StaticLoadObject(UAnimBlueprint::StaticClass(), nullptr, *AnimBpPath));
+        if (!AnimBP) { ANIM_ERROR_RESPONSE(FString::Printf(TEXT("AnimBlueprint not found: %s"), *AnimBpPath), TEXT("ASSET_NOT_FOUND")); }
+
+        // Find any node whose class name starts with "AnimGraphNode_LinkedAnimGraph" or
+        // "AnimGraphNode_LinkedAnimLayer". We use class-name matching to avoid hard-pinning
+        // these headers (they have moved between modules across UE versions).
+        TArray<TSharedPtr<FJsonValue>> Layers;
+        for (UEdGraph* Graph : AnimBP->FunctionGraphs)
+        {
+            if (!Graph) continue;
+            for (UEdGraphNode* Node : Graph->Nodes)
+            {
+                if (!Node) continue;
+                const FString ClassName = Node->GetClass()->GetName();
+                if (!ClassName.StartsWith(TEXT("AnimGraphNode_LinkedAnim"))) continue;
+
+                TSharedPtr<FJsonObject> L = MakeShared<FJsonObject>();
+                L->SetStringField(TEXT("nodeId"), Node->NodeGuid.ToString());
+                L->SetStringField(TEXT("nodeClass"), ClassName);
+                L->SetStringField(TEXT("title"), Node->GetNodeTitle(ENodeTitleType::ListView).ToString());
+                L->SetStringField(TEXT("parentGraph"), Graph->GetName());
+
+                // Dump every UObjectProperty / FStructProperty named like Instance/InterfaceClass/Layer*/
+                // PoseLink so the caller can see what drives the link selection.
+                TSharedPtr<FJsonObject> Props = MakeShared<FJsonObject>();
+                for (TFieldIterator<FProperty> It(Node->GetClass()); It; ++It)
+                {
+                    FProperty* Prop = *It;
+                    if (!Prop) continue;
+                    const FString PropName = Prop->GetName();
+                    const bool bRelevant = PropName.Contains(TEXT("Class")) || PropName.Contains(TEXT("Instance"))
+                        || PropName.Contains(TEXT("Layer")) || PropName.Contains(TEXT("Tag"));
+                    if (!bRelevant) continue;
+
+                    FString Exported;
+                    Prop->ExportTextItem_Direct(Exported, Prop->ContainerPtrToValuePtr<void>(Node), nullptr, nullptr, PPF_None);
+                    Props->SetStringField(PropName, Exported);
+                }
+                L->SetObjectField(TEXT("properties"), Props);
+                Layers.Add(MakeShared<FJsonValueObject>(L));
+            }
+        }
+        Response->SetArrayField(TEXT("linkedAnimNodes"), Layers);
+        Response->SetNumberField(TEXT("count"), Layers.Num());
+        ANIM_SUCCESS_RESPONSE(FString::Printf(TEXT("Found %d linked anim node(s) on %s"), Layers.Num(), *AnimBP->GetName()));
+        return Response;
+    }
+
     // Unknown action
     Response->SetBoolField(TEXT("success"), false);
     Response->SetStringField(TEXT("error"), FString::Printf(TEXT("Unknown animation authoring action: %s"), *SubAction));

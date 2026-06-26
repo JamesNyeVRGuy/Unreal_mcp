@@ -1,6 +1,7 @@
 #include "AssetRegistry/ARFilter.h"
 #include "Dom/JsonObject.h"
 #include "AssetRegistry/AssetRegistryModule.h"
+#include "Misc/PackageName.h"
 #include "McpAutomationBridgeGlobals.h"
 #include "McpAutomationBridgeHelpers.h"
 #include "McpAutomationBridgeSubsystem.h"
@@ -329,13 +330,36 @@ bool UMcpAutomationBridgeSubsystem::HandleAssetQueryAction(
       bHasValidPaths = true;
     }
     
-    // Default to /Game if no valid paths specified
+    // When no paths are specified, search ALL mounted content roots — not just
+    // /Game. This lets callers find plugin assets (e.g. /ALS/...) without having
+    // to enumerate mount points themselves. The optional searchText filter keeps
+    // result sets bounded.
     if (!bHasValidPaths) {
-      Filter.PackagePaths.Add(FName(TEXT("/Game")));
+      TArray<FString> MountedRoots;
+      FPackageName::QueryRootContentPaths(MountedRoots);
+      for (const FString& Root : MountedRoots) {
+        // QueryRootContentPaths returns roots with trailing slash (e.g. "/Game/").
+        FString Trimmed = Root;
+        if (Trimmed.EndsWith(TEXT("/")) && Trimmed.Len() > 1) {
+          Trimmed.RemoveAt(Trimmed.Len() - 1);
+        }
+        // Skip engine internal roots that would bloat results.
+        if (Trimmed.StartsWith(TEXT("/Script")) || Trimmed.StartsWith(TEXT("/Memory")) ||
+            Trimmed.StartsWith(TEXT("/Temp"))) {
+          continue;
+        }
+        Filter.PackagePaths.Add(FName(*Trimmed));
+      }
+      // Fallback: if QueryRootContentPaths somehow returned nothing usable, keep /Game.
+      if (Filter.PackagePaths.Num() == 0) {
+        Filter.PackagePaths.Add(FName(TEXT("/Game")));
+      }
     }
 
-    // Parse Recursion - DEFAULT to false to prevent massive scans
-    bool bRecursivePaths = false;  // Changed from true to false for safety
+    // Parse Recursion - default to TRUE so that searching one folder actually descends.
+    // Non-recursive search of a folder is rarely what the caller wants and produces
+    // confusingly empty results when assets sit one level deeper.
+    bool bRecursivePaths = true;
     if (Payload->HasField(TEXT("recursivePaths")))
       Payload->TryGetBoolField(TEXT("recursivePaths"), bRecursivePaths);
     Filter.bRecursivePaths = bRecursivePaths;
@@ -345,19 +369,40 @@ bool UMcpAutomationBridgeSubsystem::HandleAssetQueryAction(
       Payload->TryGetBoolField(TEXT("recursiveClasses"), bRecursiveClasses);
     Filter.bRecursiveClasses = bRecursiveClasses;
 
+    // Optional case-insensitive substring filter on AssetName.
+    FString SearchText;
+    Payload->TryGetStringField(TEXT("searchText"), SearchText);
+    if (SearchText.IsEmpty())
+    {
+      Payload->TryGetStringField(TEXT("name"), SearchText);
+    }
+    if (SearchText.IsEmpty())
+    {
+      Payload->TryGetStringField(TEXT("nameContains"), SearchText);
+    }
+
     // Execute Query with safety limit
     FAssetRegistryModule &AssetRegistryModule =
         FModuleManager::LoadModuleChecked<FAssetRegistryModule>(
             "AssetRegistry");
     IAssetRegistry &AssetRegistry = AssetRegistryModule.Get();
-    
+
     // REMOVED: ScanPathsSynchronous() was causing indefinite hangs when paths weren't indexed.
     // The AssetRegistry's GetAssets() already uses cached data and will return empty results
     // for unscanned paths. The cache is populated automatically during editor startup.
     // If a path is not cached, the query returns empty results rather than blocking indefinitely.
-    
+
     TArray<FAssetData> AssetDataList;
     AssetRegistry.GetAssets(Filter, AssetDataList);
+
+    // Post-filter by AssetName substring (case-insensitive).
+    if (!SearchText.IsEmpty())
+    {
+      AssetDataList.RemoveAll([&SearchText](const FAssetData& Data)
+      {
+        return !Data.AssetName.ToString().Contains(SearchText, ESearchCase::IgnoreCase);
+      });
+    }
 
     // Apply Limit
     int32 Limit = 100;

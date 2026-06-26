@@ -20,6 +20,8 @@
 #include "Materials/MaterialInstanceConstant.h"
 #include "Exporters/Exporter.h"
 #include "Misc/FileHelper.h"
+#include "Framework/Notifications/NotificationManager.h"
+#include "Widgets/Notifications/SNotificationList.h"
 #endif
 
 bool UMcpAutomationBridgeSubsystem::HandleSystemControlAction(
@@ -39,7 +41,16 @@ bool UMcpAutomationBridgeSubsystem::HandleSystemControlAction(
       !Lower.StartsWith(TEXT("run_tests")) &&
       !Lower.StartsWith(TEXT("test_progress")) &&
       !Lower.StartsWith(TEXT("test_stale")) &&
-      Lower != TEXT("export_asset")) {
+      Lower != TEXT("export_asset") &&
+      Lower != TEXT("show_notification") &&
+      Lower != TEXT("read_log") &&
+      Lower != TEXT("generate_project_files") &&
+      Lower != TEXT("regenerate_project_files") &&
+      Lower != TEXT("cook") &&
+      Lower != TEXT("cook_content") &&
+      Lower != TEXT("live_coding") &&
+      Lower != TEXT("hot_reload") &&
+      Lower != TEXT("recompile")) {
     return false; // Not handled by this function
   }
 
@@ -466,6 +477,172 @@ bool UMcpAutomationBridgeSubsystem::HandleSystemControlAction(
                              Result, TEXT("EXPORT_FAILED"));
     }
     return true;
+  } else if (Lower == TEXT("show_notification")) {
+    FString Message;
+    Payload->TryGetStringField(TEXT("message"), Message);
+    if (Message.IsEmpty())
+    {
+      SendAutomationError(RequestingSocket, RequestId,
+                          TEXT("message is required"), TEXT("INVALID_ARGUMENT"));
+      return true;
+    }
+
+    FString TypeStr;
+    Payload->TryGetStringField(TEXT("type"), TypeStr);
+    double Duration = 5.0;
+    Payload->TryGetNumberField(TEXT("duration"), Duration);
+
+    SNotificationItem::ECompletionState CompletionState = SNotificationItem::CS_None;
+    if (TypeStr.Equals(TEXT("success"), ESearchCase::IgnoreCase))
+      CompletionState = SNotificationItem::CS_Success;
+    else if (TypeStr.Equals(TEXT("fail"), ESearchCase::IgnoreCase) || TypeStr.Equals(TEXT("error"), ESearchCase::IgnoreCase))
+      CompletionState = SNotificationItem::CS_Fail;
+    else if (TypeStr.Equals(TEXT("pending"), ESearchCase::IgnoreCase))
+      CompletionState = SNotificationItem::CS_Pending;
+
+    FNotificationInfo Info(FText::FromString(Message));
+    Info.bFireAndForget = true;
+    Info.ExpireDuration = static_cast<float>(Duration);
+    Info.bUseThrobber = (CompletionState == SNotificationItem::CS_Pending);
+
+    TSharedPtr<SNotificationItem> NotificationItem = FSlateNotificationManager::Get().AddNotification(Info);
+    if (NotificationItem.IsValid() && CompletionState != SNotificationItem::CS_None)
+    {
+      NotificationItem->SetCompletionState(CompletionState);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("message"), Message);
+    Result->SetStringField(TEXT("type"), TypeStr.IsEmpty() ? TEXT("info") : TypeStr);
+    Result->SetNumberField(TEXT("duration"), Duration);
+    SendAutomationResponse(RequestingSocket, RequestId, true,
+                           TEXT("Notification shown"), Result);
+    return true;
+  } else if (Lower == TEXT("read_log")) {
+    // Delegate to the log handler
+    TSharedPtr<FJsonObject> LogPayload = MakeShared<FJsonObject>();
+    LogPayload->SetStringField(TEXT("subAction"), TEXT("read"));
+    if (Payload->HasField(TEXT("count")))
+      LogPayload->SetField(TEXT("count"), Payload->TryGetField(TEXT("count")));
+    if (Payload->HasField(TEXT("category")))
+      LogPayload->SetField(TEXT("category"), Payload->TryGetField(TEXT("category")));
+    if (Payload->HasField(TEXT("verbosity")))
+      LogPayload->SetField(TEXT("verbosity"), Payload->TryGetField(TEXT("verbosity")));
+    return HandleLogAction(RequestId, TEXT("manage_logs"), LogPayload, RequestingSocket);
+  }
+
+  // --- Generate project files ---
+  if (Lower == TEXT("generate_project_files") || Lower == TEXT("regenerate_project_files"))
+  {
+    FString UProjectPath = FPaths::GetProjectFilePath();
+    FString UBTPath = FPaths::Combine(FPaths::EngineDir(), TEXT("Build/BatchFiles/Build.bat"));
+
+    FString EnginePath = FPaths::ConvertRelativePathToFull(FPaths::EngineDir());
+    FString FullProjectPath = FPaths::ConvertRelativePathToFull(UProjectPath);
+
+    // Try GenerateProjectFiles script first (source builds)
+    FString GenerateScript;
+#if PLATFORM_WINDOWS
+    GenerateScript = FPaths::Combine(EnginePath, TEXT("Build/BatchFiles/GenerateProjectFiles.bat"));
+#else
+    GenerateScript = FPaths::Combine(EnginePath, TEXT("Build/BatchFiles/Linux/GenerateProjectFiles.sh"));
+#endif
+
+    FString ExePath;
+    FString Args;
+
+    if (FPaths::FileExists(GenerateScript))
+    {
+      ExePath = GenerateScript;
+      Args = FString::Printf(TEXT("-projectfiles -project=\"%s\" -game -engine"), *FullProjectPath);
+    }
+    else
+    {
+      // Fallback for installed engine builds: use UnrealBuildTool directly
+      FString UBTExe;
+#if PLATFORM_WINDOWS
+      UBTExe = FPaths::Combine(EnginePath, TEXT("Binaries/DotNET/UnrealBuildTool/UnrealBuildTool.exe"));
+#else
+      UBTExe = FPaths::Combine(EnginePath, TEXT("Binaries/DotNET/UnrealBuildTool/UnrealBuildTool"));
+#endif
+
+      if (!FPaths::FileExists(UBTExe))
+      {
+        SendAutomationResponse(RequestingSocket, RequestId, false,
+                               FString::Printf(TEXT("Neither GenerateProjectFiles script (%s) nor UBT (%s) found"), *GenerateScript, *UBTExe),
+                               nullptr, TEXT("SCRIPT_NOT_FOUND"));
+        return true;
+      }
+
+      ExePath = UBTExe;
+      Args = FString::Printf(TEXT("-projectfiles -project=\"%s\" -game -engine -progress"), *FullProjectPath);
+    }
+
+    FProcHandle Proc = FPlatformProcess::CreateProc(*ExePath, *Args, true, false, false, nullptr, 0, nullptr, nullptr);
+    bool bLaunched = Proc.IsValid();
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetBoolField(TEXT("launched"), bLaunched);
+    Result->SetStringField(TEXT("script"), GenerateScript);
+    Result->SetStringField(TEXT("projectPath"), UProjectPath);
+    SendAutomationResponse(RequestingSocket, RequestId, bLaunched,
+                           bLaunched ? TEXT("Project file generation started") : TEXT("Failed to launch GenerateProjectFiles"),
+                           Result);
+    return true;
+  }
+
+  // --- Cook content ---
+  if (Lower == TEXT("cook") || Lower == TEXT("cook_content"))
+  {
+    FString Platform;
+    Payload->TryGetStringField(TEXT("platform"), Platform);
+    if (Platform.IsEmpty())
+      Platform = TEXT("WindowsEditor");
+
+    FString UProjectPath = FPaths::ConvertRelativePathToFull(FPaths::GetProjectFilePath());
+    FString EditorExe = FPaths::ConvertRelativePathToFull(FPlatformProcess::ExecutablePath());
+
+    // Build cook command line
+    FString CookArgs = FString::Printf(
+        TEXT("\"%s\" -run=cook -targetplatform=%s -iterate -unversioned"),
+        *UProjectPath, *Platform);
+
+    FProcHandle Proc = FPlatformProcess::CreateProc(*EditorExe, *CookArgs, true, false, false, nullptr, 0, nullptr, nullptr);
+    bool bLaunched = Proc.IsValid();
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetBoolField(TEXT("launched"), bLaunched);
+    Result->SetStringField(TEXT("platform"), Platform);
+    Result->SetStringField(TEXT("projectPath"), UProjectPath);
+    SendAutomationResponse(RequestingSocket, RequestId, bLaunched,
+                           bLaunched ? FString::Printf(TEXT("Content cook started for %s"), *Platform) : TEXT("Failed to launch cook"),
+                           Result);
+    return true;
+  }
+
+  // --- Live coding / hot reload ---
+  if (Lower == TEXT("live_coding") || Lower == TEXT("hot_reload") || Lower == TEXT("recompile"))
+  {
+    bool bSuccess = false;
+    FString Message;
+
+    // Trigger Live Coding via console command (avoids module dependency)
+    if (GEditor && GEditor->GetEditorWorldContext().World())
+    {
+      GEditor->GetEditorWorldContext().World()->Exec(
+          GEditor->GetEditorWorldContext().World(), TEXT("LiveCoding.Compile"));
+      bSuccess = true;
+      Message = TEXT("Live Coding compile triggered via console command");
+    }
+    else
+    {
+      Message = TEXT("No editor world available for Live Coding");
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetBoolField(TEXT("triggered"), bSuccess);
+    SendAutomationResponse(RequestingSocket, RequestId, bSuccess, Message, Result);
+    return true;
   }
 
   return false;
@@ -475,4 +652,88 @@ bool UMcpAutomationBridgeSubsystem::HandleSystemControlAction(
                          nullptr, TEXT("NOT_IMPLEMENTED"));
   return true;
 #endif
+}
+
+bool UMcpAutomationBridgeSubsystem::HandleBatchAction(
+    const FString &RequestId, const FString &Action,
+    const TSharedPtr<FJsonObject> &Payload,
+    TSharedPtr<FMcpBridgeWebSocket> RequestingSocket) {
+  const TArray<TSharedPtr<FJsonValue>>* RequestsArray = nullptr;
+  if (!Payload || !Payload->TryGetArrayField(TEXT("requests"), RequestsArray) || !RequestsArray)
+  {
+    SendAutomationError(RequestingSocket, RequestId,
+                        TEXT("requests array is required"), TEXT("INVALID_ARGUMENT"));
+    return true;
+  }
+
+  TArray<TSharedPtr<FJsonValue>> Results;
+  int32 SuccessCount = 0;
+  int32 FailCount = 0;
+
+  for (int32 i = 0; i < RequestsArray->Num(); ++i)
+  {
+    const TSharedPtr<FJsonValue>& ReqVal = (*RequestsArray)[i];
+    if (ReqVal->Type != EJson::Object)
+    {
+      TSharedPtr<FJsonObject> ErrObj = MakeShared<FJsonObject>();
+      ErrObj->SetNumberField(TEXT("index"), i);
+      ErrObj->SetBoolField(TEXT("success"), false);
+      ErrObj->SetStringField(TEXT("error"), TEXT("Expected object in requests array"));
+      Results.Add(MakeShared<FJsonValueObject>(ErrObj));
+      ++FailCount;
+      continue;
+    }
+
+    TSharedPtr<FJsonObject> ReqObj = ReqVal->AsObject();
+    FString SubAction;
+    ReqObj->TryGetStringField(TEXT("action"), SubAction);
+    if (SubAction.IsEmpty())
+    {
+      TSharedPtr<FJsonObject> ErrObj = MakeShared<FJsonObject>();
+      ErrObj->SetNumberField(TEXT("index"), i);
+      ErrObj->SetBoolField(TEXT("success"), false);
+      ErrObj->SetStringField(TEXT("error"), TEXT("action field required in each request"));
+      Results.Add(MakeShared<FJsonValueObject>(ErrObj));
+      ++FailCount;
+      continue;
+    }
+
+    // Generate a sub-request ID
+    FString SubRequestId = FString::Printf(TEXT("%s_batch_%d"), *RequestId, i);
+
+    // Capture the response by processing synchronously
+    // We create the payload from the request object itself
+    TSharedPtr<FJsonObject> SubPayload = ReqObj;
+
+    // Process the sub-request through the normal handler chain
+    // We track the result via a simple success check
+    bool bSubHandled = false;
+
+    // Try the handler registry first (O(1) lookup)
+    if (const FAutomationHandler* Handler = AutomationHandlers.Find(SubAction))
+    {
+      bSubHandled = (*Handler)(SubRequestId, SubAction, SubPayload, RequestingSocket);
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetNumberField(TEXT("index"), i);
+    ResultObj->SetStringField(TEXT("action"), SubAction);
+    ResultObj->SetBoolField(TEXT("dispatched"), bSubHandled);
+    if (bSubHandled)
+      ++SuccessCount;
+    else
+      ++FailCount;
+    Results.Add(MakeShared<FJsonValueObject>(ResultObj));
+  }
+
+  TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+  Result->SetNumberField(TEXT("totalRequests"), RequestsArray->Num());
+  Result->SetNumberField(TEXT("dispatched"), SuccessCount);
+  Result->SetNumberField(TEXT("failed"), FailCount);
+  Result->SetArrayField(TEXT("results"), Results);
+  SendAutomationResponse(RequestingSocket, RequestId, SuccessCount > 0,
+                         FString::Printf(TEXT("Batch: %d dispatched, %d failed of %d"),
+                                         SuccessCount, FailCount, RequestsArray->Num()),
+                         Result);
+  return true;
 }

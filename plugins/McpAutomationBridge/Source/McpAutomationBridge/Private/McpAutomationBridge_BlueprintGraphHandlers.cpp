@@ -39,6 +39,14 @@
 #include "Kismet2/KismetEditorUtilities.h"
 #include "ScopedTransaction.h"
 
+#if __has_include("Subsystems/AssetEditorSubsystem.h")
+#include "Subsystems/AssetEditorSubsystem.h"
+#elif __has_include("AssetEditorSubsystem.h")
+#include "AssetEditorSubsystem.h"
+#endif
+
+#include "BlueprintEditor.h"
+
 #endif
 
 /**
@@ -110,6 +118,134 @@ bool UMcpAutomationBridgeSubsystem::HandleBlueprintGraphAction(
     }
   }
 
+  // Special case: get_selected_nodes operates on the active Blueprint editor
+  if (EarlySubAction == TEXT("get_selected_nodes")) {
+    if (!GEditor) {
+      SendAutomationError(RequestingSocket, RequestId,
+                          TEXT("Editor not available."), TEXT("EDITOR_NOT_AVAILABLE"));
+      return true;
+    }
+
+    UAssetEditorSubsystem* AssetEditorSS = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>();
+    if (!AssetEditorSS) {
+      SendAutomationError(RequestingSocket, RequestId,
+                          TEXT("AssetEditorSubsystem not available."), TEXT("SUBSYSTEM_NOT_AVAILABLE"));
+      return true;
+    }
+
+    // Find the target Blueprint editor: use assetPath if provided, otherwise scan all open editors
+    FBlueprintEditor* BlueprintEditor = nullptr;
+    UBlueprint* FoundBlueprint = nullptr;
+
+    FString RequestedPath;
+    if (Payload->TryGetStringField(TEXT("assetPath"), RequestedPath) && !RequestedPath.IsEmpty()) {
+      UBlueprint* BP = LoadObject<UBlueprint>(nullptr, *RequestedPath);
+      if (!BP) {
+        Payload->TryGetStringField(TEXT("blueprintPath"), RequestedPath);
+        if (!RequestedPath.IsEmpty()) {
+          BP = LoadObject<UBlueprint>(nullptr, *RequestedPath);
+        }
+      }
+      if (BP) {
+        IAssetEditorInstance* EditorInstance = AssetEditorSS->FindEditorForAsset(BP, false);
+        if (EditorInstance) {
+          BlueprintEditor = static_cast<FBlueprintEditor*>(EditorInstance);
+          FoundBlueprint = BP;
+        }
+      }
+    }
+
+    // Fallback: find first open Blueprint editor
+    if (!BlueprintEditor) {
+      TArray<UObject*> EditedAssets = AssetEditorSS->GetAllEditedAssets();
+      for (UObject* Asset : EditedAssets) {
+        UBlueprint* BP = Cast<UBlueprint>(Asset);
+        if (!BP) continue;
+        IAssetEditorInstance* EditorInstance = AssetEditorSS->FindEditorForAsset(BP, false);
+        if (!EditorInstance) continue;
+        FBlueprintEditor* CandidateEditor = static_cast<FBlueprintEditor*>(EditorInstance);
+        if (CandidateEditor->GetFocusedGraph()) {
+          BlueprintEditor = CandidateEditor;
+          FoundBlueprint = BP;
+          break;
+        }
+      }
+    }
+
+    if (!BlueprintEditor || !FoundBlueprint) {
+      SendAutomationError(RequestingSocket, RequestId,
+                          TEXT("No open Blueprint editor found."), TEXT("EDITOR_NOT_FOUND"));
+      return true;
+    }
+
+    UEdGraph* FocusedGraph = BlueprintEditor->GetFocusedGraph();
+    FString FocusedGraphName = FocusedGraph ? FocusedGraph->GetName() : TEXT("None");
+
+    // Get selected nodes
+    FGraphPanelSelectionSet SelectedNodes = BlueprintEditor->GetSelectedNodes();
+
+    TArray<TSharedPtr<FJsonValue>> NodesArray;
+    for (UObject* SelectedObj : SelectedNodes) {
+      UEdGraphNode* Node = Cast<UEdGraphNode>(SelectedObj);
+      if (!Node) continue;
+
+      TSharedPtr<FJsonObject> NodeObj = MakeShared<FJsonObject>();
+      NodeObj->SetStringField(TEXT("name"), Node->GetName());
+      NodeObj->SetStringField(TEXT("nodeId"), Node->NodeGuid.ToString());
+      NodeObj->SetStringField(TEXT("class"), Node->GetClass()->GetName());
+      NodeObj->SetStringField(TEXT("title"), Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString());
+      NodeObj->SetNumberField(TEXT("posX"), Node->NodePosX);
+      NodeObj->SetNumberField(TEXT("posY"), Node->NodePosY);
+
+      // Comment text for comment nodes
+      if (UEdGraphNode_Comment* CommentNode = Cast<UEdGraphNode_Comment>(Node)) {
+        NodeObj->SetStringField(TEXT("comment"), CommentNode->NodeComment);
+      }
+
+      // Pins
+      TArray<TSharedPtr<FJsonValue>> PinsArray;
+      for (UEdGraphPin* Pin : Node->Pins) {
+        if (!Pin) continue;
+        TSharedPtr<FJsonObject> PinObj = MakeShared<FJsonObject>();
+        PinObj->SetStringField(TEXT("name"), Pin->GetName());
+        PinObj->SetStringField(TEXT("displayName"), Pin->GetDisplayName().ToString());
+        PinObj->SetStringField(TEXT("direction"), Pin->Direction == EGPD_Input ? TEXT("Input") : TEXT("Output"));
+        PinObj->SetStringField(TEXT("type"), Pin->PinType.PinCategory.ToString());
+        PinObj->SetBoolField(TEXT("connected"), Pin->LinkedTo.Num() > 0);
+
+        // Connected pin references
+        if (Pin->LinkedTo.Num() > 0) {
+          TArray<TSharedPtr<FJsonValue>> LinkedArray;
+          for (UEdGraphPin* LinkedPin : Pin->LinkedTo) {
+            if (!LinkedPin || !LinkedPin->GetOwningNode()) continue;
+            TSharedPtr<FJsonObject> LinkObj = MakeShared<FJsonObject>();
+            LinkObj->SetStringField(TEXT("nodeId"), LinkedPin->GetOwningNode()->NodeGuid.ToString());
+            LinkObj->SetStringField(TEXT("nodeName"), LinkedPin->GetOwningNode()->GetName());
+            LinkObj->SetStringField(TEXT("pinName"), LinkedPin->GetName());
+            LinkedArray.Add(MakeShared<FJsonValueObject>(LinkObj));
+          }
+          PinObj->SetArrayField(TEXT("linkedTo"), LinkedArray);
+        }
+
+        PinsArray.Add(MakeShared<FJsonValueObject>(PinObj));
+      }
+      NodeObj->SetArrayField(TEXT("pins"), PinsArray);
+
+      NodesArray.Add(MakeShared<FJsonValueObject>(NodeObj));
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("blueprintName"), FoundBlueprint->GetName());
+    Result->SetStringField(TEXT("blueprintPath"), FoundBlueprint->GetPathName());
+    Result->SetStringField(TEXT("focusedGraph"), FocusedGraphName);
+    Result->SetArrayField(TEXT("selectedNodes"), NodesArray);
+    Result->SetNumberField(TEXT("count"), NodesArray.Num());
+    SendAutomationResponse(RequestingSocket, RequestId, true,
+                           FString::Printf(TEXT("Found %d selected nodes."), NodesArray.Num()),
+                           Result);
+    return true;
+  }
+
   // Special case: list_node_types doesn't require a blueprint - it lists all UK2Node types globally
   if (EarlySubAction == TEXT("list_node_types")) {
     TArray<TSharedPtr<FJsonValue>> NodeTypes;
@@ -172,6 +308,38 @@ bool UMcpAutomationBridgeSubsystem::HandleBlueprintGraphAction(
         FString::Printf(TEXT("Could not load blueprint at path: %s"),
                         *AssetPath),
         TEXT("ASSET_NOT_FOUND"));
+    return true;
+  }
+
+  // list_graphs: enumerate all graphs in the Blueprint without requiring a target graph
+  if (EarlySubAction == TEXT("list_graphs")) {
+    TArray<UEdGraph*> AllGraphs;
+    Blueprint->GetAllGraphs(AllGraphs);
+
+    TArray<TSharedPtr<FJsonValue>> GraphArray;
+    for (UEdGraph* Graph : AllGraphs) {
+      if (!Graph) continue;
+      TSharedPtr<FJsonObject> GraphObj = MakeShared<FJsonObject>();
+      GraphObj->SetStringField(TEXT("name"), Graph->GetName());
+      GraphObj->SetStringField(TEXT("schema"), Graph->GetSchema() ? Graph->GetSchema()->GetClass()->GetName() : TEXT("None"));
+      GraphObj->SetNumberField(TEXT("nodeCount"), Graph->Nodes.Num());
+
+      // Classify the graph
+      FString GraphType = TEXT("Other");
+      if (Blueprint->UbergraphPages.Contains(Graph)) GraphType = TEXT("UbergraphPage");
+      else if (Blueprint->FunctionGraphs.Contains(Graph)) GraphType = TEXT("Function");
+      else if (Blueprint->MacroGraphs.Contains(Graph)) GraphType = TEXT("Macro");
+      GraphObj->SetStringField(TEXT("graphType"), GraphType);
+
+      GraphArray.Add(MakeShared<FJsonValueObject>(GraphObj));
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetArrayField(TEXT("graphs"), GraphArray);
+    Result->SetNumberField(TEXT("count"), GraphArray.Num());
+    AddAssetVerification(Result, Blueprint);
+    SendAutomationResponse(RequestingSocket, RequestId, true,
+                           TEXT("Graphs listed."), Result);
     return true;
   }
 
@@ -1219,6 +1387,42 @@ bool UMcpAutomationBridgeSubsystem::HandleBlueprintGraphAction(
     AddAssetVerification(Result, Blueprint);
     SendAutomationResponse(RequestingSocket, RequestId, true,
                            TEXT("Pin default value set."), Result);
+    return true;
+  } else if (SubAction == TEXT("focus_graph")) {
+    // Open the target graph tab in the Blueprint editor and bring it to front
+    if (!GEditor) {
+      SendAutomationError(RequestingSocket, RequestId,
+                          TEXT("Editor not available."), TEXT("EDITOR_NOT_AVAILABLE"));
+      return true;
+    }
+
+    UAssetEditorSubsystem* AssetEditorSS = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>();
+    if (!AssetEditorSS) {
+      SendAutomationError(RequestingSocket, RequestId,
+                          TEXT("AssetEditorSubsystem not available."), TEXT("SUBSYSTEM_NOT_AVAILABLE"));
+      return true;
+    }
+
+    // Open the editor if not already open
+    AssetEditorSS->OpenEditorForAsset(Blueprint);
+
+    IAssetEditorInstance* EditorInstance = AssetEditorSS->FindEditorForAsset(Blueprint, false);
+    if (!EditorInstance) {
+      SendAutomationError(RequestingSocket, RequestId,
+                          TEXT("Could not find or open Blueprint editor."), TEXT("EDITOR_NOT_FOUND"));
+      return true;
+    }
+
+    FBlueprintEditor* BlueprintEditor = static_cast<FBlueprintEditor*>(EditorInstance);
+    BlueprintEditor->OpenGraphAndBringToFront(TargetGraph);
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("graphName"), TargetGraph->GetName());
+    Result->SetStringField(TEXT("blueprintPath"), AssetPath);
+    AddAssetVerification(Result, Blueprint);
+    SendAutomationResponse(RequestingSocket, RequestId, true,
+                           FString::Printf(TEXT("Focused graph '%s'."), *TargetGraph->GetName()),
+                           Result);
     return true;
   }
 

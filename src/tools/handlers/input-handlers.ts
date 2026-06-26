@@ -12,13 +12,13 @@ function getTimeoutMs(): number {
 
 /** Valid parameters for each input action */
 const VALID_PARAMS_BY_ACTION: Record<string, Set<string>> = {
-    create_input_action: new Set(['action', 'name', 'path', 'timeoutMs']),
+    create_input_action: new Set(['action', 'name', 'path', 'valueType', 'timeoutMs']),
     create_input_mapping_context: new Set(['action', 'name', 'path', 'timeoutMs']),
-    add_mapping: new Set(['action', 'contextPath', 'actionPath', 'key', 'timeoutMs']),
-    remove_mapping: new Set(['action', 'contextPath', 'actionPath', 'timeoutMs']),
-    map_input_action: new Set(['action', 'contextPath', 'actionPath', 'key', 'timeoutMs']),
-    set_input_trigger: new Set(['action', 'actionPath', 'triggerType', 'timeoutMs']),
-    set_input_modifier: new Set(['action', 'actionPath', 'modifierType', 'timeoutMs']),
+    add_mapping: new Set(['action', 'contextPath', 'actionPath', 'key', 'modifiers', 'triggers', 'timeoutMs']),
+    remove_mapping: new Set(['action', 'contextPath', 'actionPath', 'key', 'timeoutMs']),
+    map_input_action: new Set(['action', 'contextPath', 'actionPath', 'key', 'modifiers', 'triggers', 'timeoutMs']),
+    set_input_trigger: new Set(['action', 'actionPath', 'contextPath', 'key', 'triggerType', 'timeoutMs']),
+    set_input_modifier: new Set(['action', 'actionPath', 'contextPath', 'key', 'modifierType', 'order', 'x', 'y', 'z', 'timeoutMs']),
     enable_input_mapping: new Set(['action', 'contextPath', 'priority', 'timeoutMs']),
     disable_input_action: new Set(['action', 'actionPath', 'timeoutMs']),
     get_input_info: new Set(['action', 'assetPath', 'timeoutMs']),
@@ -98,6 +98,8 @@ const REQUIRED_PATHS_BY_ACTION: Record<string, string[]> = {
     get_input_info: ['assetPath'],
 };
 
+// Optional path parameters handled in sendRequest via argsRecord passthrough
+
 export async function handleInputTools(
     action: string,
     args: HandlerArgs,
@@ -126,9 +128,11 @@ export async function handleInputTools(
           }
       }
       
-      // Also check for optional path params (path, assetPath for non-required)
+      // Also check for optional path params
       if (argsRecord.path !== undefined) pathParams.path = argsRecord.path;
       if (argsRecord.assetPath !== undefined) pathParams.assetPath = argsRecord.assetPath;
+      if (argsRecord.contextPath !== undefined && !pathParams.contextPath) pathParams.contextPath = argsRecord.contextPath;
+      if (argsRecord.actionPath !== undefined && !pathParams.actionPath) pathParams.actionPath = argsRecord.actionPath;
       
       const pathValidation = validateAndSanitizePaths(pathParams, requiredPaths);
       if (!pathValidation.valid) {
@@ -161,11 +165,13 @@ export async function handleInputTools(
                 return ResponseFactory.error(pathValidation.error || 'Invalid path');
             }
             const sanitizedPath = pathValidation.sanitized.path ?? (argsTyped.path ?? '');
-            const result = await executeAutomationRequest(tools, TOOL_ACTIONS.MANAGE_INPUT, {
+            const payload: Record<string, unknown> = {
                 action: 'create_input_action',
                 name: argsTyped.name || '',
                 path: sanitizedPath
-            }, undefined, { timeoutMs });
+            };
+            if (argsRecord.valueType !== undefined) payload.valueType = argsRecord.valueType;
+            const result = await executeAutomationRequest(tools, TOOL_ACTIONS.MANAGE_INPUT, payload as HandlerArgs, undefined, { timeoutMs });
             return cleanObject(result) as Record<string, unknown>;
         }
         case 'create_input_mapping_context': {
@@ -184,39 +190,44 @@ export async function handleInputTools(
         }
         case 'add_mapping': {
             // Validate path parameters
-            const pathValidation = validateAndSanitizePaths({ 
-                contextPath: argsTyped.contextPath, 
-                actionPath: argsTyped.actionPath 
+            const pathValidation = validateAndSanitizePaths({
+                contextPath: argsTyped.contextPath,
+                actionPath: argsTyped.actionPath
             }, ['contextPath', 'actionPath']);
             if (!pathValidation.valid) {
                 return ResponseFactory.error(pathValidation.error || 'Invalid path');
             }
             const sanitizedContextPath = pathValidation.sanitized.contextPath ?? (argsTyped.contextPath ?? '');
             const sanitizedActionPath = pathValidation.sanitized.actionPath ?? (argsTyped.actionPath ?? '');
-            const result = await executeAutomationRequest(tools, TOOL_ACTIONS.MANAGE_INPUT, {
+            const addPayload: Record<string, unknown> = {
                 action: 'add_mapping',
                 contextPath: sanitizedContextPath,
                 actionPath: sanitizedActionPath,
                 key: argsTyped.key ?? ''
-            }, undefined, { timeoutMs });
+            };
+            if (argsRecord.modifiers !== undefined) addPayload.modifiers = argsRecord.modifiers;
+            if (argsRecord.triggers !== undefined) addPayload.triggers = argsRecord.triggers;
+            const result = await executeAutomationRequest(tools, TOOL_ACTIONS.MANAGE_INPUT, addPayload as HandlerArgs, undefined, { timeoutMs });
             return cleanObject(result) as Record<string, unknown>;
         }
         case 'remove_mapping': {
             // Validate path parameters
-            const pathValidation = validateAndSanitizePaths({ 
-                contextPath: argsTyped.contextPath, 
-                actionPath: argsTyped.actionPath 
+            const pathValidation = validateAndSanitizePaths({
+                contextPath: argsTyped.contextPath,
+                actionPath: argsTyped.actionPath
             }, ['contextPath', 'actionPath']);
             if (!pathValidation.valid) {
                 return ResponseFactory.error(pathValidation.error || 'Invalid path');
             }
-            const sanitizedContextPath = pathValidation.sanitized.contextPath ?? (argsTyped.contextPath ?? '');
-            const sanitizedActionPath = pathValidation.sanitized.actionPath ?? (argsTyped.actionPath ?? '');
-            const result = await executeAutomationRequest(tools, TOOL_ACTIONS.MANAGE_INPUT, {
+            const rmContextPath = pathValidation.sanitized.contextPath ?? (argsTyped.contextPath ?? '');
+            const rmActionPath = pathValidation.sanitized.actionPath ?? (argsTyped.actionPath ?? '');
+            const rmPayload: Record<string, unknown> = {
                 action: 'remove_mapping',
-                contextPath: sanitizedContextPath,
-                actionPath: sanitizedActionPath
-            }, undefined, { timeoutMs });
+                contextPath: rmContextPath,
+                actionPath: rmActionPath
+            };
+            if (argsRecord.key !== undefined) rmPayload.key = argsRecord.key;
+            const result = await executeAutomationRequest(tools, TOOL_ACTIONS.MANAGE_INPUT, rmPayload as HandlerArgs, undefined, { timeoutMs });
             return cleanObject(result) as Record<string, unknown>;
         }
 

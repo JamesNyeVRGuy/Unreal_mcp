@@ -2091,6 +2091,68 @@ bool UMcpAutomationBridgeSubsystem::HandleAnimationPhysicsAction(
         }
       }
     }
+  } else if (LowerSub == TEXT("list_curves") || LowerSub == TEXT("get_curves")) {
+    // Enumerate all float curves on a UAnimSequence (name, key count, value range).
+    FString AssetPath;
+    Payload->TryGetStringField(TEXT("assetPath"), AssetPath);
+    if (AssetPath.IsEmpty()) {
+      Payload->TryGetStringField(TEXT("animSequencePath"), AssetPath);
+    }
+    if (AssetPath.IsEmpty()) {
+      Message = TEXT("assetPath required for list_curves");
+      ErrorCode = TEXT("INVALID_ARGUMENT");
+      Resp->SetStringField(TEXT("error"), Message);
+    } else {
+      UAnimSequence* AnimSeq = LoadObject<UAnimSequence>(nullptr, *AssetPath);
+      if (!AnimSeq) {
+        Message = FString::Printf(TEXT("Animation sequence not found: %s"), *AssetPath);
+        ErrorCode = TEXT("ASSET_NOT_FOUND");
+        Resp->SetStringField(TEXT("error"), Message);
+      } else {
+#if WITH_EDITOR && ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3
+        TArray<TSharedPtr<FJsonValue>> CurvesArr;
+        const IAnimationDataModel* DataModel = AnimSeq->GetDataModel();
+        if (DataModel) {
+          const FAnimationCurveData& CurveData = DataModel->GetCurveData();
+          for (const FFloatCurve& Curve : CurveData.FloatCurves) {
+            TSharedPtr<FJsonObject> CurveObj = MakeShared<FJsonObject>();
+            CurveObj->SetStringField(TEXT("name"), Curve.GetName().ToString());
+            const int32 KeyCount = Curve.FloatCurve.GetNumKeys();
+            CurveObj->SetNumberField(TEXT("keyCount"), KeyCount);
+            float MinVal = 0.0f, MaxVal = 0.0f;
+            if (KeyCount > 0) {
+              MinVal = TNumericLimits<float>::Max();
+              MaxVal = TNumericLimits<float>::Lowest();
+              for (auto It = Curve.FloatCurve.GetKeyIterator(); It; ++It) {
+                MinVal = FMath::Min(MinVal, It->Value);
+                MaxVal = FMath::Max(MaxVal, It->Value);
+              }
+              CurveObj->SetNumberField(TEXT("minValue"), MinVal);
+              CurveObj->SetNumberField(TEXT("maxValue"), MaxVal);
+              if (KeyCount > 0) {
+                auto FirstKey = Curve.FloatCurve.GetFirstKey();
+                auto LastKey = Curve.FloatCurve.GetLastKey();
+                CurveObj->SetNumberField(TEXT("firstKeyTime"), FirstKey.Time);
+                CurveObj->SetNumberField(TEXT("lastKeyTime"), LastKey.Time);
+                CurveObj->SetNumberField(TEXT("firstKeyValue"), FirstKey.Value);
+                CurveObj->SetNumberField(TEXT("lastKeyValue"), LastKey.Value);
+              }
+            }
+            CurvesArr.Add(MakeShared<FJsonValueObject>(CurveObj));
+          }
+        }
+        Resp->SetArrayField(TEXT("curves"), CurvesArr);
+        Resp->SetNumberField(TEXT("curveCount"), CurvesArr.Num());
+        Resp->SetStringField(TEXT("assetPath"), AssetPath);
+        bSuccess = true;
+        Message = FString::Printf(TEXT("Found %d float curve(s) on %s"), CurvesArr.Num(), *AnimSeq->GetName());
+#else
+        Message = TEXT("list_curves requires UE 5.3+ editor build");
+        ErrorCode = TEXT("NOT_IMPLEMENTED");
+        Resp->SetStringField(TEXT("error"), Message);
+#endif
+      }
+    }
   } else if (LowerSub == TEXT("set_curve_key")) {
     // Set an animation curve key
     FString AssetPath;

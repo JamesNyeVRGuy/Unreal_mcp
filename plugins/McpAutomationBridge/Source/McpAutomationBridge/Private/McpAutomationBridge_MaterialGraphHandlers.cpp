@@ -15,9 +15,199 @@
 #include "Materials/MaterialExpressionScalarParameter.h"
 #include "Materials/MaterialExpressionTextureSample.h"
 #include "Materials/MaterialExpressionVectorParameter.h"
+#include "Materials/MaterialExpressionCustom.h"
+#include "MaterialExpressionIO.h"
 #include "Engine/Texture.h"
 
 // Material API compatibility macros are defined in McpAutomationBridgeHelpers.h
+
+namespace {
+
+// Lowercase + strip whitespace. Lets callers pass "Final Color", "final color",
+// or "FinalColor" interchangeably.
+static FString NormalizePinKey(const FString& InName)
+{
+    FString Out = InName.ToLower();
+    Out.ReplaceInline(TEXT(" "), TEXT(""), ESearchCase::CaseSensitive);
+    Out.ReplaceInline(TEXT("\t"), TEXT(""), ESearchCase::CaseSensitive);
+    return Out;
+}
+
+// Resolve a material-root input by friendly name. Returns nullptr on miss.
+// UI domain note: the "Final Color" pin in the UI Material editor is wired to
+// the EmissiveColor field internally, and Opacity stays Opacity. Map both.
+static FExpressionInput* ResolveMainMaterialInput(UMaterial* Material, const FString& InName)
+{
+    if (!Material) return nullptr;
+    const FString Key = NormalizePinKey(InName);
+    if (Key.IsEmpty()) return nullptr;
+#if WITH_EDITORONLY_DATA
+    if (Key == TEXT("basecolor"))                                    return &MCP_GET_MATERIAL_INPUT(Material, BaseColor);
+    if (Key == TEXT("emissivecolor") || Key == TEXT("finalcolor"))   return &MCP_GET_MATERIAL_INPUT(Material, EmissiveColor);
+    if (Key == TEXT("roughness"))                                    return &MCP_GET_MATERIAL_INPUT(Material, Roughness);
+    if (Key == TEXT("metallic"))                                     return &MCP_GET_MATERIAL_INPUT(Material, Metallic);
+    if (Key == TEXT("specular"))                                     return &MCP_GET_MATERIAL_INPUT(Material, Specular);
+    if (Key == TEXT("normal"))                                       return &MCP_GET_MATERIAL_INPUT(Material, Normal);
+    if (Key == TEXT("opacity"))                                      return &MCP_GET_MATERIAL_INPUT(Material, Opacity);
+    if (Key == TEXT("opacitymask"))                                  return &MCP_GET_MATERIAL_INPUT(Material, OpacityMask);
+    if (Key == TEXT("ambientocclusion") || Key == TEXT("ao"))        return &MCP_GET_MATERIAL_INPUT(Material, AmbientOcclusion);
+    if (Key == TEXT("subsurfacecolor"))                              return &MCP_GET_MATERIAL_INPUT(Material, SubsurfaceColor);
+    if (Key == TEXT("worldpositionoffset"))                          return &MCP_GET_MATERIAL_INPUT(Material, WorldPositionOffset);
+    if (Key == TEXT("refraction"))                                   return &MCP_GET_MATERIAL_INPUT(Material, Refraction);
+    if (Key == TEXT("pixeldepthoffset"))                             return &MCP_GET_MATERIAL_INPUT(Material, PixelDepthOffset);
+#endif
+    return nullptr;
+}
+
+// Friendly aliases for the main-material inputs, for /docs purposes.
+static const TCHAR* GetMainInputDisplayName(const FString& Key)
+{
+    const FString K = NormalizePinKey(Key);
+    if (K == TEXT("finalcolor"))     return TEXT("Final Color (alias of EmissiveColor)");
+    if (K == TEXT("emissivecolor"))  return TEXT("Emissive Color");
+    if (K == TEXT("basecolor"))      return TEXT("Base Color");
+    if (K == TEXT("opacitymask"))    return TEXT("Opacity Mask");
+    return *Key;
+}
+
+// Resolve a named input on a material expression to a writable FExpressionInput*.
+// Handles three cases:
+//   1. UPROPERTY field whose struct type derives from FExpressionInput
+//      (covers FExpressionInput, FColorMaterialInput, FScalarMaterialInput,
+//      FVectorMaterialInput, FMaterialAttributesInput).
+//   2. UMaterialExpressionCustom: look up by InputName in the Inputs array.
+//   3. Case-insensitive whitespace-tolerant match against the property name.
+// Returns nullptr if no input matches.
+static FExpressionInput* FindNamedInputOnExpression(UMaterialExpression* Expr, const FString& PinName)
+{
+    if (!Expr || PinName.IsEmpty()) return nullptr;
+    const FString Key = NormalizePinKey(PinName);
+
+    // Custom expression: named inputs live in a TArray<FCustomInput>.
+    if (UMaterialExpressionCustom* CustomExpr = Cast<UMaterialExpressionCustom>(Expr))
+    {
+        for (FCustomInput& Custom : CustomExpr->Inputs)
+        {
+            if (NormalizePinKey(Custom.InputName.ToString()) == Key)
+            {
+                return &Custom.Input;
+            }
+        }
+        return nullptr;
+    }
+
+    // Standard expressions: scan UPROPERTY fields for any FStructProperty whose
+    // Struct is FExpressionInput or one of its derived input structs. FExpressionInput
+    // is declared USTRUCT(noexport) so it has no compile-time StaticStruct accessor;
+    // we recognize it (and known derivatives) by struct name instead.
+    auto IsExpressionInputStruct = [](UScriptStruct* S) {
+        if (!S) return false;
+        const FName N = S->GetFName();
+        // Walk the reflection parent chain so any custom derivative is caught too.
+        for (UScriptStruct* Cur = S; Cur; Cur = Cast<UScriptStruct>(Cur->GetSuperStruct()))
+        {
+            const FName CurName = Cur->GetFName();
+            if (CurName == TEXT("ExpressionInput")) return true;
+            if (CurName == TEXT("ColorMaterialInput")) return true;
+            if (CurName == TEXT("ScalarMaterialInput")) return true;
+            if (CurName == TEXT("VectorMaterialInput")) return true;
+            if (CurName == TEXT("Vector2MaterialInput")) return true;
+            if (CurName == TEXT("Vector4MaterialInput")) return true;
+            if (CurName == TEXT("MaterialAttributesInput")) return true;
+            if (CurName == TEXT("ShadingModelMaterialInput")) return true;
+            if (CurName == TEXT("SubstrateMaterialInput")) return true;
+        }
+        (void)N;
+        return false;
+    };
+
+    for (TFieldIterator<FProperty> It(Expr->GetClass()); It; ++It)
+    {
+        FStructProperty* StructProp = CastField<FStructProperty>(*It);
+        if (!StructProp || !StructProp->Struct) continue;
+        if (!IsExpressionInputStruct(StructProp->Struct)) continue;
+
+        if (NormalizePinKey(StructProp->GetName()) == Key)
+        {
+            return StructProp->ContainerPtrToValuePtr<FExpressionInput>(Expr);
+        }
+    }
+    return nullptr;
+}
+
+// Emit per-node input descriptors as a JSON array.
+static TArray<TSharedPtr<FJsonValue>> EnumerateExpressionInputs(UMaterialExpression* Expr)
+{
+    TArray<TSharedPtr<FJsonValue>> Out;
+    if (!Expr) return Out;
+
+    if (UMaterialExpressionCustom* CustomExpr = Cast<UMaterialExpressionCustom>(Expr))
+    {
+        for (const FCustomInput& Custom : CustomExpr->Inputs)
+        {
+            TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+            Obj->SetStringField(TEXT("name"), Custom.InputName.ToString());
+            Obj->SetStringField(TEXT("type"), TEXT("FCustomInput"));
+            Obj->SetBoolField(TEXT("connected"), Custom.Input.Expression != nullptr);
+            Out.Add(MakeShared<FJsonValueObject>(Obj));
+        }
+        return Out;
+    }
+
+    auto IsExpressionInputStruct = [](UScriptStruct* S) {
+        if (!S) return false;
+        for (UScriptStruct* Cur = S; Cur; Cur = Cast<UScriptStruct>(Cur->GetSuperStruct()))
+        {
+            const FName CurName = Cur->GetFName();
+            if (CurName == TEXT("ExpressionInput")) return true;
+            if (CurName == TEXT("ColorMaterialInput")) return true;
+            if (CurName == TEXT("ScalarMaterialInput")) return true;
+            if (CurName == TEXT("VectorMaterialInput")) return true;
+            if (CurName == TEXT("Vector2MaterialInput")) return true;
+            if (CurName == TEXT("Vector4MaterialInput")) return true;
+            if (CurName == TEXT("MaterialAttributesInput")) return true;
+            if (CurName == TEXT("ShadingModelMaterialInput")) return true;
+            if (CurName == TEXT("SubstrateMaterialInput")) return true;
+        }
+        return false;
+    };
+    for (TFieldIterator<FProperty> It(Expr->GetClass()); It; ++It)
+    {
+        FStructProperty* StructProp = CastField<FStructProperty>(*It);
+        if (!StructProp || !StructProp->Struct) continue;
+        if (!IsExpressionInputStruct(StructProp->Struct)) continue;
+        const FExpressionInput* Input = StructProp->ContainerPtrToValuePtr<FExpressionInput>(Expr);
+        TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+        Obj->SetStringField(TEXT("name"), StructProp->GetName());
+        Obj->SetStringField(TEXT("type"), StructProp->Struct->GetName());
+        Obj->SetBoolField(TEXT("connected"), Input && Input->Expression != nullptr);
+        Out.Add(MakeShared<FJsonValueObject>(Obj));
+    }
+    return Out;
+}
+
+// Emit per-node output descriptors. Each UMaterialExpression has a TArray<FExpressionOutput>
+// `Outputs`; the primary output is at index 0 and usually has an empty OutputName.
+// Custom expressions additionally expose AdditionalOutputs by name.
+static TArray<TSharedPtr<FJsonValue>> EnumerateExpressionOutputs(UMaterialExpression* Expr)
+{
+    TArray<TSharedPtr<FJsonValue>> Out;
+    if (!Expr) return Out;
+
+    const TArray<FExpressionOutput>& Outputs = Expr->GetOutputs();
+    for (int32 i = 0; i < Outputs.Num(); ++i)
+    {
+        TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+        const FString Name = Outputs[i].OutputName.IsNone() ? FString::Printf(TEXT("Output%d"), i)
+                                                            : Outputs[i].OutputName.ToString();
+        Obj->SetStringField(TEXT("name"), Name);
+        Obj->SetNumberField(TEXT("index"), i);
+        Out.Add(MakeShared<FJsonValueObject>(Obj));
+    }
+    return Out;
+}
+
+} // namespace
 
 bool UMcpAutomationBridgeSubsystem::HandleMaterialGraphAction(
     const FString &RequestId, const FString &Action,
@@ -308,109 +498,73 @@ bool UMcpAutomationBridgeSubsystem::HandleMaterialGraphAction(
       return true;
     }
 
-    // Target could be another expression OR the main material node (if
-    // TargetNodeId is empty or "Main" or no target specified)
-    if ((TargetNodeId.IsEmpty() || TargetNodeId == TEXT("Main")) && TargetIndex < 0) {
-      bool bFound = false;
-#if WITH_EDITORONLY_DATA
-      if (InputName == TEXT("BaseColor")) {
-        MCP_GET_MATERIAL_INPUT(Material, BaseColor).Expression = SourceExpr;
-        bFound = true;
-      } else if (InputName == TEXT("EmissiveColor")) {
-        MCP_GET_MATERIAL_INPUT(Material, EmissiveColor).Expression = SourceExpr;
-        bFound = true;
-      } else if (InputName == TEXT("Roughness")) {
-        MCP_GET_MATERIAL_INPUT(Material, Roughness).Expression = SourceExpr;
-        bFound = true;
-      } else if (InputName == TEXT("Metallic")) {
-        MCP_GET_MATERIAL_INPUT(Material, Metallic).Expression = SourceExpr;
-        bFound = true;
-      } else if (InputName == TEXT("Specular")) {
-        MCP_GET_MATERIAL_INPUT(Material, Specular).Expression = SourceExpr;
-        bFound = true;
-      } else if (InputName == TEXT("Normal")) {
-        MCP_GET_MATERIAL_INPUT(Material, Normal).Expression = SourceExpr;
-        bFound = true;
-      } else if (InputName == TEXT("Opacity")) {
-        MCP_GET_MATERIAL_INPUT(Material, Opacity).Expression = SourceExpr;
-        bFound = true;
-      } else if (InputName == TEXT("OpacityMask")) {
-        MCP_GET_MATERIAL_INPUT(Material, OpacityMask).Expression = SourceExpr;
-        bFound = true;
-      } else if (InputName == TEXT("AmbientOcclusion")) {
-        MCP_GET_MATERIAL_INPUT(Material, AmbientOcclusion).Expression = SourceExpr;
-        bFound = true;
-      } else if (InputName == TEXT("SubsurfaceColor")) {
-        MCP_GET_MATERIAL_INPUT(Material, SubsurfaceColor).Expression = SourceExpr;
-        bFound = true;
-      }
-#endif
+    // Optional: source output index (for nodes with multiple outputs, e.g. TexCoord).
+    int32 SourceOutputIndex = 0;
+    Payload->TryGetNumberField(TEXT("sourceOutputIndex"), SourceOutputIndex);
+    if (SourceOutputIndex < 0) SourceOutputIndex = 0;
 
-      if (bFound) {
-        Material->PostEditChange();
-        Material->MarkPackageDirty();
-        TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
-        AddAssetVerification(Result, Material);
-        Result->SetStringField(TEXT("inputName"), InputName);
-        SendAutomationResponse(Socket, RequestId, true,
-                               TEXT("Connected to main material node."), Result);
-      } else {
+    // Target could be another expression OR the main material node (if
+    // TargetNodeId is empty or "Main" or no target specified).
+    if ((TargetNodeId.IsEmpty() || TargetNodeId == TEXT("Main")) && TargetIndex < 0) {
+      FExpressionInput* MainInput = ResolveMainMaterialInput(Material, InputName);
+      if (!MainInput) {
         SendAutomationError(
             Socket, RequestId,
-            FString::Printf(TEXT("Unknown input on main node: %s"), *InputName),
+            FString::Printf(TEXT("Unknown input on main node: '%s'. Valid (UI): Final Color, Opacity. (Surface): Base Color, Emissive Color, Roughness, Metallic, Specular, Normal, Opacity, Opacity Mask, Ambient Occlusion, Subsurface Color, World Position Offset, Refraction, Pixel Depth Offset."),
+                            *InputName),
             TEXT("INVALID_PIN"));
+        return true;
       }
+      MainInput->Expression = SourceExpr;
+      MainInput->OutputIndex = SourceOutputIndex;
+      Material->PostEditChange();
+      Material->MarkPackageDirty();
+      TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+      AddAssetVerification(Result, Material);
+      Result->SetStringField(TEXT("inputName"), InputName);
+      Result->SetStringField(TEXT("resolvedInput"), GetMainInputDisplayName(InputName));
+      Result->SetNumberField(TEXT("sourceOutputIndex"), SourceOutputIndex);
+      SendAutomationResponse(Socket, RequestId, true,
+                             TEXT("Connected to main material node."), Result);
       return true;
     } else {
       UMaterialExpression *TargetExpr = (TargetIndex >= 0)
           ? FindExpressionByIdOrNameOrIndex(FString(), TargetIndex)
           : FindExpressionByIdOrNameOrIndex(TargetNodeId);
 
-      if (TargetExpr) {
-        // We have to iterate properties to find the FExpressionInput
-        FProperty *Prop =
-            TargetExpr->GetClass()->FindPropertyByName(FName(*InputName));
-        if (Prop) {
-          if (FStructProperty *StructProp = CastField<FStructProperty>(Prop)) {
-            if (StructProp->Struct->GetFName() ==
-                FName("ExpressionInput")) // Note: FExpressionInput struct name
-                                          // check
-            {
-              FExpressionInput *InputPtr =
-                  StructProp->ContainerPtrToValuePtr<FExpressionInput>(
-                      TargetExpr);
-              if (InputPtr) {
-                InputPtr->Expression = SourceExpr;
-                Material->PostEditChange();
-                Material->MarkPackageDirty();
-                TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
-                AddAssetVerification(Result, Material);
-                Result->SetStringField(TEXT("inputName"), InputName);
-                SendAutomationResponse(Socket, RequestId, true,
-                                       TEXT("Nodes connected."), Result);
-                return true;
-              }
-            }
-          }
-          // Also handle FColorMaterialInput, FScalarMaterialInput,
-          // FVectorMaterialInput which inherit FExpressionInput Just check if
-          // it has 'Expression' member? No, reflection doesn't work that way
-          // easily. In 5.6, inputs are usually typed. Fallback: check known
-          // input names for common nodes or generic implementation Since we
-          // can't easily genericize this without iteration or casting, we might
-          // fail if property isn't direct FExpressionInput. But typically they
-          // are FExpressionInput derived.
-        }
-
-        SendAutomationError(
-            Socket, RequestId,
-            FString::Printf(TEXT("Input pin '%s' not found or not compatible."),
-                            *InputName),
-            TEXT("PIN_NOT_FOUND"));
-      } else {
+      if (!TargetExpr) {
         SendAutomationError(Socket, RequestId, TEXT("Target node not found."),
                             TEXT("NODE_NOT_FOUND"));
+        return true;
       }
+
+      FExpressionInput* InputPtr = FindNamedInputOnExpression(TargetExpr, InputName);
+      if (!InputPtr) {
+        // Build a helpful error listing the available input names so the
+        // caller can correct without round-tripping through get_node_details.
+        TArray<TSharedPtr<FJsonValue>> Available = EnumerateExpressionInputs(TargetExpr);
+        TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+        Result->SetArrayField(TEXT("availableInputs"), Available);
+        Result->SetStringField(TEXT("nodeType"), TargetExpr->GetClass()->GetName());
+        Result->SetStringField(TEXT("requestedInput"), InputName);
+        SendAutomationResponse(
+            Socket, RequestId, false,
+            FString::Printf(TEXT("Input pin '%s' not found on %s. See availableInputs."),
+                            *InputName, *TargetExpr->GetClass()->GetName()),
+            Result, TEXT("PIN_NOT_FOUND"));
+        return true;
+      }
+
+      InputPtr->Expression = SourceExpr;
+      InputPtr->OutputIndex = SourceOutputIndex;
+      Material->PostEditChange();
+      Material->MarkPackageDirty();
+      TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+      AddAssetVerification(Result, Material);
+      Result->SetStringField(TEXT("inputName"), InputName);
+      Result->SetNumberField(TEXT("sourceOutputIndex"), SourceOutputIndex);
+      SendAutomationResponse(Socket, RequestId, true,
+                             TEXT("Nodes connected."), Result);
       return true;
     }
   } else if (SubAction == TEXT("break_connections")) {
@@ -526,11 +680,14 @@ bool UMcpAutomationBridgeSubsystem::HandleMaterialGraphAction(
     if (TargetExpr) {
       TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
       AddAssetVerification(Result, Material);
+      Result->SetStringField(TEXT("nodeId"), TargetExpr->MaterialExpressionGuid.ToString());
       Result->SetStringField(TEXT("nodeType"),
                              TargetExpr->GetClass()->GetName());
       Result->SetStringField(TEXT("desc"), TargetExpr->Desc);
       Result->SetNumberField(TEXT("x"), TargetExpr->MaterialExpressionEditorX);
       Result->SetNumberField(TEXT("y"), TargetExpr->MaterialExpressionEditorY);
+      Result->SetArrayField(TEXT("inputs"), EnumerateExpressionInputs(TargetExpr));
+      Result->SetArrayField(TEXT("outputs"), EnumerateExpressionOutputs(TargetExpr));
 
       SendAutomationResponse(Socket, RequestId, true,
                              TEXT("Node details retrieved."), Result);

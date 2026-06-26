@@ -101,6 +101,30 @@ const handlers: Record<string, ActorActionHandler> = {
 
         // Ensure successful spawn returns the actual actor name
         if (result && result.success && result.actorName) {
+            // Set properties on the spawned actor if provided
+            if (args.properties && typeof args.properties === 'object') {
+                const propertyResults: Array<{ property: string; success: boolean; error?: string }> = [];
+                for (const [propName, propValue] of Object.entries(args.properties as Record<string, unknown>)) {
+                    try {
+                        await executeAutomationRequest(tools, 'set_object_property', {
+                            objectPath: result.actorName as string,
+                            propertyName: propName,
+                            value: propValue
+                        });
+                        propertyResults.push({ property: propName, success: true });
+                    } catch (err: unknown) {
+                        const msg = err instanceof Error ? err.message : String(err);
+                        propertyResults.push({ property: propName, success: false, error: msg });
+                    }
+                }
+                return {
+                    ...result,
+                    message: `Spawned actor: ${result.actorName}`,
+                    name: result.actorName,
+                    propertyResults
+                };
+            }
+
             return {
                 ...result,
                 message: `Spawned actor: ${result.actorName}`,
@@ -427,15 +451,33 @@ const handlers: Record<string, ActorActionHandler> = {
     },
     call_function: async (args, tools) => {
         const params = normalizeArgs(args, [
-            { key: 'actorName', aliases: ['name', 'actor_name'], required: true },
+            { key: 'actorName', aliases: ['name', 'actor_name'] },
+            { key: 'objectPath', aliases: ['object_path', 'path'] },
             { key: 'functionName', aliases: ['function_name'], required: true },
             { key: 'arguments', aliases: ['args'] }
         ]);
-        const actorName = extractString(params, 'actorName');
         const functionName = extractString(params, 'functionName');
+        const objectPath = extractOptionalString(params, 'objectPath');
+        const actorName = extractOptionalString(params, 'actorName');
+
+        // If objectPath is provided and looks like an asset path, route to inspect handler
+        // which supports calling functions on any UObject
+        if (objectPath && objectPath.includes('/')) {
+            return await executeAutomationRequest(tools, 'inspect', {
+                action: 'call_function',
+                objectPath,
+                functionName,
+                arguments: params.arguments
+            }) as Record<string, unknown>;
+        }
+
+        const target = actorName || objectPath || '';
+        if (!target) {
+            return { success: false, error: 'INVALID_ARGUMENT', message: 'actorName or objectPath is required' };
+        }
         return await executeAutomationRequest(tools, TOOL_ACTIONS.CONTROL_ACTOR, {
             action: 'call_function',
-            actorName,
+            actorName: target,
             functionName,
             arguments: params.arguments
         }) as Record<string, unknown>;

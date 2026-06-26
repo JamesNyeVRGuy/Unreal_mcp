@@ -643,7 +643,7 @@ export async function handleSystemTools(action: string, args: HandlerArgs, tools
         action: 'set_fullscreen'
       };
     }
-    case 'read_log':
+    case 'read_log_file':
       return cleanObject(await tools.logTools.readOutputLog(args as Record<string, unknown>));
     case 'export_asset': {
       // Export asset to FBX/OBJ format
@@ -697,6 +697,58 @@ export async function handleSystemTools(action: string, args: HandlerArgs, tools
         assetPath,
         exportPath
       });
+    }
+    case 'show_notification': {
+      const message = typeof argsTyped.message === 'string' ? argsTyped.message.trim() : '';
+      if (!message) {
+        return { success: false, error: 'INVALID_ARGUMENT', message: 'message is required', action: 'show_notification' };
+      }
+      const type = typeof (argsTyped as Record<string, unknown>).type === 'string'
+        ? ((argsTyped as Record<string, unknown>).type as string).trim() : 'info';
+      const duration = typeof (argsTyped as Record<string, unknown>).duration === 'number'
+        ? (argsTyped as Record<string, unknown>).duration as number : 5.0;
+      return cleanObject(await executeAutomationRequest(tools, 'system_control', {
+        action: 'show_notification',
+        message,
+        type,
+        duration
+      }) as Record<string, unknown>);
+    }
+    case 'read_log':
+    case 'get_log': {
+      const count = typeof (argsTyped as Record<string, unknown>).count === 'number'
+        ? (argsTyped as Record<string, unknown>).count as number : 100;
+      const category = typeof (argsTyped as Record<string, unknown>).category === 'string'
+        ? ((argsTyped as Record<string, unknown>).category as string).trim() : '';
+      const verbosity = typeof (argsTyped as Record<string, unknown>).verbosity === 'string'
+        ? ((argsTyped as Record<string, unknown>).verbosity as string).trim() : '';
+      return cleanObject(await executeAutomationRequest(tools, 'manage_logs', {
+        subAction: 'read',
+        count,
+        category,
+        verbosity
+      }) as Record<string, unknown>);
+    }
+    case 'batch': {
+      const requests = (argsTyped as Record<string, unknown>).requests;
+      if (!Array.isArray(requests) || requests.length === 0) {
+        return { success: false, error: 'INVALID_ARGUMENT', message: 'requests array is required', action: 'batch' };
+      }
+      return cleanObject(await executeAutomationRequest(tools, 'batch', {
+        requests
+      }) as Record<string, unknown>);
+    }
+    case 'generate_project_files':
+    case 'regenerate_project_files':
+    case 'cook':
+    case 'cook_content':
+    case 'live_coding':
+    case 'hot_reload':
+    case 'recompile': {
+      return cleanObject(await executeAutomationRequest(tools, 'system_control', {
+        ...args,
+        action: argsTyped.action
+      }) as Record<string, unknown>);
     }
     default: {
       const res = await executeAutomationRequest(tools, 'system_control', args, 'Automation bridge not available for system control operations');
