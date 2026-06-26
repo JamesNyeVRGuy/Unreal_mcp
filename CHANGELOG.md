@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **Plugin content path support**: Paths like `/Canopy/...` now pass through TS and C++ security layers. C++ uses `FPackageName::IsValidLongPackageName()` instead of hardcoded heuristic. TS adds regex fallback for plugin paths.
+- **Request serialization**: All `executeAutomationRequest` calls now route through `UnrealCommandQueue` for serial execution, preventing concurrent Game Thread crashes.
+- **Actor property setting at spawn time**: `control_actor` spawn action accepts optional `properties` parameter to set UPROPERTYs immediately after spawn.
+- **`manage_data_table` tool** (9 actions): create_data_table, list_rows, get_row, add_row, edit_row, remove_row, get_structure, import_json, export_json.
+- **`manage_gameplay_tags` tool** (9 actions): add_tag, remove_tag, list_tags, get_tag_children, has_tag, add_tag_to_actor, remove_tag_from_actor, get_actor_tags, get_tag_hierarchy.
+- **`manage_data_asset` tool** (6 actions): create_data_asset, create_data_asset_blueprint, get_data_asset_properties, set_data_asset_properties, list_data_assets, duplicate_data_asset.
+- **`manage_layers` tool**: Actor layer management via `ULayersSubsystem` — create/delete/rename layers, add/remove actors, toggle visibility.
+- **`manage_string_table` tool** (9 actions): create_string_table, add_entry, remove_entry, edit_entry, get_entry, list_entries, import_json, export_json, list_string_tables.
+- **`manage_anim_notify` tool** (6 actions): add_notify, add_notify_state, remove_notify, list_notifies, set_notify_properties, list_notify_classes.
+- **`manage_blueprint_interface` tool**: Create blueprint interfaces, add/remove functions, list interfaces, implement on blueprints.
+- **`manage_physics_material` tool**: Create/configure/list/assign/duplicate physical materials (friction, restitution, surface types).
+- **Undo transaction wrapping**: All MCP handler dispatches are now wrapped in `FScopedTransaction` so operations appear in Edit > Undo.
+- **`MCP_ALLOWED_CONTENT_ROOTS` env var** documented in `.env.example`.
+
+---
+
 ## 🏷️ [0.5.18] - 2026-02-21
 
 > [!IMPORTANT]
