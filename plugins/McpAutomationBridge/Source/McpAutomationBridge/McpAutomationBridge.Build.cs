@@ -114,7 +114,8 @@ PublicDependencyModuleNames.AddRange(new string[]
                 "AudioEditor", "DataValidation", "NiagaraEditor",
                 // Phase 24: GAS, Audio, and missing module dependencies
                 "GameplayAbilities",  // Required for UAttributeSet, UGameplayEffect, UGameplayAbility, etc.
-                "AudioMixer"          // Required for FAudioEQEffect::ClampValues
+                "AudioMixer",         // Required for FAudioEQEffect::ClampValues
+                "ContentBrowser"      // Required for Content Browser navigation (SyncBrowserToAssets/Folders)
             });
 
             // Add OpenSSL for TLS support (requires WITH_SSL)
@@ -146,6 +147,7 @@ PublicDependencyModuleNames.AddRange(new string[]
             // These modules may not be available in all UE versions or plugin configurations
             TryAddConditionalModule(Target, EngineDir, "StateTreeModule", "StateTreeModule");
             TryAddConditionalModule(Target, EngineDir, "StateTreeEditorModule", "StateTreeEditorModule");
+            TryAddConditionalModule(Target, EngineDir, "PropertyBindingUtils", "PropertyBindingUtils");
             TryAddConditionalModule(Target, EngineDir, "SmartObjectsModule", "SmartObjectsModule");
             TryAddConditionalModule(Target, EngineDir, "SmartObjectsEditorModule", "SmartObjectsEditorModule");
             TryAddConditionalModule(Target, EngineDir, "MassEntity", "MassEntity");

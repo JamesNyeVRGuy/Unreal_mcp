@@ -59,6 +59,18 @@ export const TOOL_ACTIONS = {
   MANAGE_GAME_FRAMEWORK: 'manage_game_framework',
   MANAGE_SESSIONS: 'manage_sessions',
   
+  // ==================== DATA TOOLS ====================
+  MANAGE_DATA_TABLE: 'manage_data_table',
+  MANAGE_GAMEPLAY_TAGS: 'manage_gameplay_tags',
+  MANAGE_DATA_ASSET: 'manage_data_asset',
+
+  // ==================== EDITOR TOOLS ====================
+  MANAGE_LAYERS: 'manage_layers',
+  MANAGE_BLUEPRINT_INTERFACE: 'manage_blueprint_interface',
+  MANAGE_PHYSICS_MATERIAL: 'manage_physics_material',
+  MANAGE_STRING_TABLE: 'manage_string_table',
+  MANAGE_ANIM_NOTIFY: 'manage_anim_notify',
+
   // ==================== UTILITY TOOLS ====================
   MANAGE_PERFORMANCE: 'manage_performance',
   

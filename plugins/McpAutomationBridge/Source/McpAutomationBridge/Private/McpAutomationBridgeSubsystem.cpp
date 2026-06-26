@@ -716,6 +716,18 @@ void UMcpAutomationBridgeSubsystem::InitializeHandlers() {
                          TSharedPtr<FMcpBridgeWebSocket> S) {
                     return HandleAddTransformTrack(R, A, P, S);
                   });
+  RegisterHandler(TEXT("render_sequence"),
+                  [this](const FString &R, const FString &A,
+                         const TSharedPtr<FJsonObject> &P,
+                         TSharedPtr<FMcpBridgeWebSocket> S) {
+                    return HandleRenderSequence(R, A, P, S);
+                  });
+  RegisterHandler(TEXT("batch"),
+                  [this](const FString &R, const FString &A,
+                         const TSharedPtr<FJsonObject> &P,
+                         TSharedPtr<FMcpBridgeWebSocket> S) {
+                    return HandleBatchAction(R, A, P, S);
+                  });
 
   // UI & Environment
   RegisterHandler(TEXT("manage_ui"), [this](const FString &R, const FString &A,
@@ -1087,6 +1099,76 @@ void UMcpAutomationBridgeSubsystem::InitializeHandlers() {
                          const TSharedPtr<FJsonObject> &P,
                          TSharedPtr<FMcpBridgeWebSocket> S) {
                     return HandleMiscAction(R, A, P, S);
+                  });
+
+  // Gameplay Tags
+  RegisterHandler(TEXT("manage_gameplay_tags"),
+                  [this](const FString &R, const FString &A,
+                         const TSharedPtr<FJsonObject> &P,
+                         TSharedPtr<FMcpBridgeWebSocket> S) {
+                    return HandleGameplayTags(R, A, P, S);
+                  });
+
+  // Data Tables
+  RegisterHandler(TEXT("manage_data_table"),
+                  [this](const FString &R, const FString &A,
+                         const TSharedPtr<FJsonObject> &P,
+                         TSharedPtr<FMcpBridgeWebSocket> S) {
+                    return HandleManageDataTableAction(R, A, P, S);
+                  });
+
+  // Data Assets
+  RegisterHandler(TEXT("manage_data_asset"),
+                  [this](const FString &R, const FString &A,
+                         const TSharedPtr<FJsonObject> &P,
+                         TSharedPtr<FMcpBridgeWebSocket> S) {
+                    return HandleManageDataAssetAction(R, A, P, S);
+                  });
+
+  // Layers
+  RegisterHandler(TEXT("manage_layers"),
+                  [this](const FString &R, const FString &A,
+                         const TSharedPtr<FJsonObject> &P,
+                         TSharedPtr<FMcpBridgeWebSocket> S) {
+                    return HandleManageLayersAction(R, A, P, S);
+                  });
+
+  // Blueprint Interfaces
+  RegisterHandler(TEXT("manage_blueprint_interface"),
+                  [this](const FString &R, const FString &A,
+                         const TSharedPtr<FJsonObject> &P,
+                         TSharedPtr<FMcpBridgeWebSocket> S) {
+                    return HandleManageBlueprintInterfaceAction(R, A, P, S);
+                  });
+
+  // Physics Materials
+  RegisterHandler(TEXT("manage_physics_material"),
+                  [this](const FString &R, const FString &A,
+                         const TSharedPtr<FJsonObject> &P,
+                         TSharedPtr<FMcpBridgeWebSocket> S) {
+                    return HandleManagePhysicsMaterialAction(R, A, P, S);
+                  });
+
+  RegisterHandler(TEXT("manage_string_table"),
+                  [this](const FString &R, const FString &A,
+                         const TSharedPtr<FJsonObject> &P,
+                         TSharedPtr<FMcpBridgeWebSocket> S) {
+                    return HandleManageStringTableAction(R, A, P, S);
+                  });
+
+  // Logs & Observability
+  RegisterHandler(TEXT("manage_logs"),
+                  [this](const FString &R, const FString &A,
+                         const TSharedPtr<FJsonObject> &P,
+                         TSharedPtr<FMcpBridgeWebSocket> S) {
+                    return HandleLogAction(R, A, P, S);
+                  });
+
+  RegisterHandler(TEXT("manage_anim_notify"),
+                  [this](const FString &R, const FString &A,
+                         const TSharedPtr<FJsonObject> &P,
+                         TSharedPtr<FMcpBridgeWebSocket> S) {
+                    return HandleManageAnimNotifyAction(R, A, P, S);
                   });
 
   // Direct action aliases for misc handlers

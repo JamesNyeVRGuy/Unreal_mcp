@@ -43,6 +43,14 @@ import { handleVolumeTools } from './handlers/volume-handlers.js';
 import { handleNavigationTools } from './handlers/navigation-handlers.js';
 import { handleSplineTools } from './handlers/spline-handlers.js';
 import { handleManageToolsTools } from './handlers/manage-tools-handlers.js';
+import { handleDataTableTools } from './handlers/data-table-handlers.js';
+import { handleGameplayTagTools } from './handlers/gameplay-tag-handlers.js';
+import { handleDataAssetTools } from './handlers/data-asset-handlers.js';
+import { handleLayerTools } from './handlers/layer-handlers.js';
+import { handleBlueprintInterfaceTools } from './handlers/blueprint-interface-handlers.js';
+import { handlePhysicsMaterialTools } from './handlers/physics-material-handlers.js';
+import { handleStringTableTools } from './handlers/string-table-handlers.js';
+import { handleAnimNotifyTools } from './handlers/anim-notify-handlers.js';
 // import { getDynamicHandlerForTool } from './dynamic-handler-registry.js';
 // import { consolidatedToolDefinitions } from './consolidated-tool-definitions.js';
 
@@ -181,7 +189,7 @@ function registerDefaultHandlers() {
       return await handleBlueprintGet(args, tools);
     }
     // Graph actions (merged from manage_blueprint_graph)
-    const graphActions = ['create_node', 'delete_node', 'connect_pins', 'break_pin_links', 'set_node_property', 'create_reroute_node', 'get_node_details', 'get_graph_details', 'get_pin_details', 'list_node_types', 'set_pin_default_value'];
+    const graphActions = ['create_node', 'delete_node', 'connect_pins', 'break_pin_links', 'set_node_property', 'create_reroute_node', 'get_node_details', 'get_graph_details', 'get_pin_details', 'list_node_types', 'set_pin_default_value', 'list_graphs', 'focus_graph', 'get_selected_nodes'];
     if (graphActions.includes(action)) {
       return await handleGraphTools('manage_blueprint_graph', action, args, tools);
     }
@@ -237,7 +245,9 @@ function registerDefaultHandlers() {
     'add_blend_node', 'add_cached_pose', 'add_slot_node', 'add_layered_blend_per_bone', 'set_anim_graph_node_value',
     'create_control_rig', 'add_control', 'add_rig_unit', 'connect_rig_elements', 'create_pose_library',
     'create_ik_rig', 'add_ik_chain', 'create_ik_retargeter', 'set_retarget_chain_mapping',
-    'get_animation_info'
+    'get_animation_info',
+    // AnimBP graph introspection (read-only)
+    'list_anim_state_machines', 'get_anim_state_machine', 'get_anim_graph', 'list_linked_anim_layers'
   ]);
   toolRegistry.register('animation_physics', async (args, tools) => {
     const action = getAction(args);
@@ -453,6 +463,30 @@ function registerDefaultHandlers() {
 
   // 40. SPLINE SYSTEM (Phase 26)
   toolRegistry.register('manage_splines', async (args, tools) => await handleSplineTools(getAction(args), args, tools));
+
+  // DATA TABLE MANAGEMENT
+  toolRegistry.register('manage_data_table', async (args, tools) => await handleDataTableTools(getAction(args), args, tools));
+
+  // GAMEPLAY TAG MANAGEMENT
+  toolRegistry.register('manage_gameplay_tags', async (args, tools) => await handleGameplayTagTools(getAction(args), args, tools));
+
+  // DATA ASSET MANAGEMENT
+  toolRegistry.register('manage_data_asset', async (args, tools) => await handleDataAssetTools(getAction(args), args, tools));
+
+  // ACTOR LAYER MANAGEMENT
+  toolRegistry.register('manage_layers', async (args, tools) => await handleLayerTools(getAction(args), args, tools));
+
+  // BLUEPRINT INTERFACE MANAGEMENT
+  toolRegistry.register('manage_blueprint_interface', async (args, tools) => await handleBlueprintInterfaceTools(getAction(args), args, tools));
+
+  // PHYSICS MATERIAL MANAGEMENT
+  toolRegistry.register('manage_physics_material', async (args, tools) => await handlePhysicsMaterialTools(getAction(args), args, tools));
+
+  // STRING TABLE MANAGEMENT
+  toolRegistry.register('manage_string_table', async (args, tools) => await handleStringTableTools(getAction(args), args, tools));
+
+  // ANIMATION NOTIFY MANAGEMENT
+  toolRegistry.register('manage_anim_notify', async (args, tools) => await handleAnimNotifyTools(getAction(args), args, tools));
 }
 
 // Initialize default handlers immediately

@@ -74,11 +74,13 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
             'get_dependencies', 'get_source_control_state', 'analyze_graph', 'get_asset_graph', 'create_thumbnail', 'set_tags', 'get_metadata', 'set_metadata', 'validate', 'fixup_redirectors', 'find_by_tag', 'generate_report',
             'create_material', 'create_material_instance', 'create_render_target', 'generate_lods', 'add_material_parameter', 'list_instances', 'reset_instance_parameters', 'exists', 'get_material_stats',
             'nanite_rebuild_mesh', 'bulk_rename', 'bulk_delete', 'source_control_checkout', 'source_control_submit',
-            'add_material_node', 'connect_material_pins', 'remove_material_node', 'break_material_connections', 'get_material_node_details', 'rebuild_material'
+            'add_material_node', 'connect_material_pins', 'remove_material_node', 'break_material_connections', 'get_material_node_details', 'rebuild_material',
+            'batch_import'
           ],
           description: 'Action to perform'
         },
         assetPath: commonSchemas.assetPath,
+        files: { type: 'array', items: { type: 'object', properties: { sourcePath: { type: 'string' }, destinationPath: { type: 'string' } } }, description: 'Array of files to batch import. Each: {sourcePath, destinationPath}. Or array of strings with default destinationPath.' },
         directory: commonSchemas.directoryPath,
         classNames: commonSchemas.arrayOfStrings,
         packagePaths: commonSchemas.arrayOfStrings,
@@ -176,7 +178,14 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
   {
     name: 'manage_blueprint',
     category: 'authoring',
-    description: 'Create Blueprints, add SCS components (mesh, collision, camera), and manipulate graph nodes.',
+    description: `Create and modify Blueprints. Requires blueprintPath (e.g. "/Game/Blueprints/BP_MyActor").
+
+GRAPH ACTIONS: create_node (nodeType, x, y, graphName), delete_node (nodeId), connect_pins (fromNodeId, fromPinName, toNodeId, toPinName), get_nodes, get_node_details, get_graph_details, get_pin_details, set_pin_default_value, set_node_property. nodeId accepts NodeGuid or UObject name. Common nodeType shortcuts: PrintString, Delay, SpawnActor, SetActorLocation, MakeVector, Branch, Sequence, Cast, Self.
+
+GRAPH NAVIGATION: list_graphs (enumerate all graphs), focus_graph (graphName - opens tab in editor), get_selected_nodes (returns selected nodes in active editor).
+
+BLUEPRINT MANAGEMENT: create, compile, get_blueprint, add_variable, add_function, add_event.
+SCS: add_scs_component, remove_scs_component, get_scs, set_scs_transform, set_scs_property.`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -184,10 +193,10 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
           type: 'string',
           enum: [
             'create', 'get_blueprint', 'get', 'compile',
-            'add_component', 'set_default', 'modify_scs', 'get_scs', 'add_scs_component', 'remove_scs_component', 'reparent_scs_component', 'set_scs_transform', 'set_scs_property',
+            'add_component', 'set_default', 'set_component_default', 'modify_scs', 'get_scs', 'add_scs_component', 'remove_scs_component', 'reparent_scs_component', 'set_scs_transform', 'set_scs_property',
             'ensure_exists', 'probe_handle', 'add_variable', 'remove_variable', 'rename_variable', 'add_function', 'add_event', 'remove_event', 'add_construction_script', 'set_variable_metadata', 'set_metadata',
             'create_node', 'add_node', 'delete_node', 'connect_pins', 'break_pin_links', 'set_node_property', 'create_reroute_node', 'get_node_details', 'get_graph_details', 'get_pin_details',
-            'list_node_types', 'set_pin_default_value'
+            'list_node_types', 'set_pin_default_value', 'list_graphs', 'focus_graph', 'get_selected_nodes'
           ],
           description: 'Blueprint action'
         },
@@ -309,7 +318,12 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
             'create_snapshot',
             'attach', 'attach_actor',
             'detach', 'detach_actor',
-            'set_actor_collision', 'call_actor_function'
+            'set_actor_collision', 'call_actor_function',
+            'select', 'select_actor', 'set_selection',
+            'rename', 'rename_actor', 'set_label', 'set_actor_label',
+            'set_folder', 'set_actor_folder', 'move_to_folder',
+            'convert', 'convert_actor', 'replace_actor_class',
+            'group', 'group_actors'
           ],
           description: 'Action'
         },
@@ -330,7 +344,15 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
         newName: commonSchemas.newName,
         tag: commonSchemas.tagName,
         variables: commonSchemas.objectProp,
-        snapshotName: commonSchemas.stringProp
+        snapshotName: commonSchemas.stringProp,
+        actorNames: { type: 'array', items: { type: 'string' }, description: 'Array of actor names (for select, group).' },
+        additive: { type: 'boolean', description: 'If true, add to current selection instead of replacing (for select).' },
+        label: { type: 'string', description: 'New label for actor (for rename).' },
+        folderPath: { type: 'string', description: 'Outliner folder path (for set_folder, group).' },
+        folder: { type: 'string', description: 'Alias for folderPath.' },
+        newClass: { type: 'string', description: 'Target class path for actor conversion (for convert).' },
+        className: { type: 'string', description: 'Alias for newClass.' },
+        groupName: { type: 'string', description: 'Name for the actor group folder (for group).' }
       },
       required: ['action']
     },
@@ -358,7 +380,14 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
   {
     name: 'control_editor',
     category: 'core',
-    description: 'Start/stop PIE, control viewport camera, run console commands, take screenshots, simulate input.',
+    description: `Editor control: PIE, viewport, screenshots, console commands, asset management.
+
+PIE: play, stop, pause, resume, eject, possess (actorName).
+VIEWPORT: set_camera (location, rotation), set_camera_fov (fov), focus_actor (actorName), set_game_view.
+SCREENSHOTS: take_screenshot/screenshot (filename, showUI:true, cropX/Y/Width/Height 0-1 normalized) - requires PIE with game window. screenshot_editor (filename) - captures editor window, works without PIE. Crop example: cropX:0.8, cropY:0, cropWidth:0.2, cropHeight:0.3 = top-right 20%.
+ASSETS: open_asset (assetPath), close_asset, save_all (auto-clears read-only flags), open_level.
+SYSTEM: console_command/execute_command (command), undo, redo.
+TIME: set_game_speed (speed), set_fixed_delta_time (deltaTime), step_frame.`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -370,11 +399,11 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
             'set_camera', 'set_camera_position', 'set_viewport_camera', 'set_camera_fov',
             'set_view_mode', 'set_viewport_resolution',
             'console_command', 'execute_command',
-            'screenshot', 'take_screenshot', 'step_frame', 'single_frame_step',
+            'screenshot', 'take_screenshot', 'screenshot_editor', 'screenshot_window', 'step_frame', 'single_frame_step',
             'start_recording', 'stop_recording',
             'create_bookmark', 'jump_to_bookmark',
             'set_preferences', 'set_viewport_realtime',
-            'open_asset', 'close_asset', 'simulate_input',
+            'open_asset', 'close_asset', 'browse_to', 'navigate_content_browser', 'simulate_input',
             'open_level', 'focus_actor',
             'show_stats', 'hide_stats',
             'set_editor_mode', 'set_immersive_mode', 'set_game_view',
@@ -438,7 +467,8 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
             'load', 'save', 'save_as', 'save_level_as', 'stream', 'unload', 'create_level', 'create_light', 'build_lighting',
             'set_metadata', 'load_cells', 'set_datalayer', 'create_datalayer',
             'export_level', 'import_level', 'list_levels', 'get_summary', 'delete', 'delete_level', 'validate_level',
-            'cleanup_invalid_datalayers', 'add_sublevel', 'rename_level', 'duplicate_level', 'get_current_level'
+            'cleanup_invalid_datalayers', 'add_sublevel', 'rename_level', 'duplicate_level', 'get_current_level',
+            'build_all', 'build_all_level', 'build_navigation', 'build_level_navigation'
           ],
           description: 'Action'
         },
@@ -636,10 +666,17 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
             'configure_vehicle', 'setup_physics_simulation',
             'create_anim_blueprint', 'add_blend_sample', 'set_axis_settings',
             'set_interpolation_settings', 'setup_retargeting',
-            'cleanup'
+            'cleanup',
+            // Animation read-only introspection
+            'list_curves', 'get_curves',
+            'list_anim_state_machines', 'get_anim_state_machine', 'get_anim_graph', 'list_linked_anim_layers',
+            'get_animation_info'
           ],
           description: 'Action'
         },
+        animBpPath: commonSchemas.assetPath,
+        blueprintPath: commonSchemas.assetPath,
+        assetPath: commonSchemas.assetPath,
         name: commonSchemas.name,
         savePath: commonSchemas.savePath,
         skeletonPath: commonSchemas.assetPath,
@@ -727,7 +764,12 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
             'run_ubt', 'run_tests', 'subscribe', 'unsubscribe', 'spawn_category', 'start_session', 'lumen_update_scene',
             'play_sound', 'create_widget', 'show_widget', 'add_widget_child',
             'set_cvar', 'get_project_settings', 'validate_assets',
-            'set_project_setting'
+            'set_project_setting',
+            'show_notification', 'read_log', 'get_log',
+            'generate_project_files', 'regenerate_project_files',
+            'cook', 'cook_content',
+            'live_coding', 'hot_reload', 'recompile',
+            'batch'
           ],
           description: 'Action'
         },
@@ -749,7 +791,12 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
         section: commonSchemas.stringProp,
         key: commonSchemas.stringProp,
         value: commonSchemas.stringProp,
-        configName: commonSchemas.stringProp
+        configName: commonSchemas.stringProp,
+        message: { type: 'string', description: 'Notification message text.' },
+        type: { type: 'string', description: 'Notification type: info, success, fail/error, pending.' },
+        duration: { type: 'number', description: 'Notification duration in seconds (default 5).' },
+        count: { type: 'number', description: 'Number of log entries to read (default 100, max 2000).' },
+        verbosity: { type: 'string', description: 'Filter logs by verbosity: Error, Warning, Display, Log, Verbose.' }
       },
       required: ['action']
     },
@@ -776,12 +823,18 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
             'get_properties', 'set_properties', 'duplicate', 'rename', 'delete', 'list', 'get_metadata', 'set_metadata',
             'add_spawnable_from_class', 'add_track', 'add_section', 'set_display_rate', 'set_tick_resolution',
             'set_work_range', 'set_view_range', 'set_track_muted', 'set_track_solo', 'set_track_locked',
-            'list_tracks', 'remove_track', 'list_track_types'
+            'list_tracks', 'remove_track', 'list_track_types',
+            'render', 'render_sequence', 'movie_render'
           ],
           description: 'Action'
         },
         name: commonSchemas.name,
         path: commonSchemas.assetPath,
+        sequencePath: { type: 'string', description: 'Path to level sequence asset (for render).' },
+        outputDirectory: { type: 'string', description: 'Output directory for rendered frames (for render).' },
+        format: { type: 'string', description: 'Output format: png, jpg, exr (for render).' },
+        resolutionX: { type: 'number', description: 'Render resolution width (default 1920).' },
+        resolutionY: { type: 'number', description: 'Render resolution height (default 1080).' },
         actorName: commonSchemas.actorName,
         actorNames: commonSchemas.arrayOfStrings,
         frame: commonSchemas.numberProp,
@@ -852,7 +905,14 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
         triggerType: commonSchemas.stringProp,
         modifierType: commonSchemas.stringProp,
         assetPath: commonSchemas.assetPath,
-        priority: { type: 'number', description: 'Priority for input mapping context (default: 0).' }
+        priority: { type: 'number', description: 'Priority for input mapping context (default: 0).' },
+        valueType: { type: 'string', description: 'Value type for Input Action: Boolean, Axis1D, Axis2D, Axis3D' },
+        modifiers: { type: 'array', description: 'Array of modifiers for add_mapping. Each element: string (type name) or object {type, order, x, y, z}.', items: {} },
+        triggers: { type: 'array', description: 'Array of triggers for add_mapping. Each element: string (type name) or object {type, holdTimeThreshold, ...}.', items: {} },
+        order: { type: 'string', description: 'Swizzle order for set_input_modifier: YXZ, ZYX, XZY, YZX, ZXY' },
+        x: { type: 'boolean', description: 'Negate X axis (for set_input_modifier with Negate type)' },
+        y: { type: 'boolean', description: 'Negate Y axis (for set_input_modifier with Negate type)' },
+        z: { type: 'boolean', description: 'Negate Z axis (for set_input_modifier with Negate type)' }
       },
       required: ['action']
     },
@@ -867,7 +927,13 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
   {
     name: 'inspect',
     category: 'core',
-    description: 'Inspect any UObject: read/write properties, list components, export snapshots, and query class info.',
+    description: `Inspect and modify UObjects. Most actions require objectPath.
+
+PROPERTIES: get_property (objectPath, propertyName), set_property (objectPath, propertyName, value). get_component_property / set_component_property (+ componentName).
+INSPECTION: get_actor_details, get_components, get_blueprint_details, get_mesh_details, get_texture_details, get_material_details, inspect_class (className).
+SEARCH: get_selected_actors, find_by_class (className), find_by_tag (tag).
+WORLD: get_project_settings, get_world_settings, get_scene_stats, get_bounding_box.
+FUNCTIONS: call_function (objectPath, functionName, arguments).`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -882,7 +948,10 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
             'get_metadata', 'add_tag', 'find_by_tag',
             'create_snapshot', 'restore_snapshot', 'export', 'delete_object', 'find_by_class', 'get_bounding_box',
             'get_project_settings', 'get_world_settings', 'get_viewport_info', 'get_selected_actors',
-            'get_scene_stats', 'get_performance_stats', 'get_memory_stats', 'get_editor_settings'
+            'get_scene_stats', 'get_performance_stats', 'get_memory_stats', 'get_editor_settings',
+            'call_function',
+            // TMap UPROPERTY editing on any UObject (including class default objects)
+            'set_map_entry', 'add_map_entry', 'remove_map_entry', 'list_map_entries'
           ],
           description: 'Action'
         },
@@ -890,9 +959,12 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
         propertyName: commonSchemas.propertyName,
         propertyPath: commonSchemas.stringProp,
         value: commonSchemas.value,
+        key: { description: 'TMap key for set_map_entry / add_map_entry / remove_map_entry. For struct keys (e.g. FGameplayTag) accepts either a tag-name string (e.g. "Als.OverlayMode.Blocking") or a full JSON object.' },
         actorName: commonSchemas.actorName,
         name: commonSchemas.name,
         componentName: commonSchemas.componentName,
+        functionName: { type: 'string', description: 'Function name to call on the UObject.' },
+        arguments: { type: 'object', description: 'Function arguments as key-value pairs.' },
         className: commonSchemas.stringProp,
         classPath: commonSchemas.assetPath,
         tag: commonSchemas.tagName,
@@ -2387,7 +2459,12 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
   {
     name: 'manage_ai',
     category: 'gameplay',
-    description: 'Create AI Controllers, configure Behavior Trees, Blackboards, EQS queries, and perception systems.',
+    description: `Create AI Controllers, configure Behavior Trees, Blackboards, EQS queries, perception systems, and State Trees.
+
+configure_state_tree_task: Set properties on task structs AND instance data. Uses taskProperties (or nodeProperties/instanceProperties aliases). Properties are applied to the task struct first, then remaining ones tried on instance data.
+  Example: taskProperties: {"AbilityTag": "(TagName=\\"Ability.Attack.Weapon\\")"}
+
+get_state_tree_info: Read state tree structure, states, tasks, conditions.`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -2399,10 +2476,10 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
             'create_behavior_tree', 'add_composite_node', 'add_task_node', 'add_decorator', 'add_service', 'configure_bt_node',
             'create_eqs_query', 'add_eqs_generator', 'add_eqs_context', 'add_eqs_test', 'configure_test_scoring',
             'add_ai_perception_component', 'configure_sight_config', 'configure_hearing_config', 'configure_damage_sense_config', 'set_perception_team',
-            'create_state_tree', 'add_state_tree_state', 'add_state_tree_transition', 'configure_state_tree_task',
+            'create_state_tree', 'add_state_tree_state', 'add_state_tree_task', 'remove_state_tree_task', 'add_state_tree_transition', 'remove_state_tree_transition', 'configure_state_tree_task', 'set_state_tree_schema', 'compile_state_tree', 'add_state_tree_binding',
             'create_smart_object_definition', 'add_smart_object_slot', 'configure_slot_behavior', 'add_smart_object_component',
             'create_mass_entity_config', 'configure_mass_entity', 'add_mass_spawner',
-            'get_ai_info',
+            'get_ai_info', 'get_state_tree_info',
             'create_blackboard', 'setup_perception',
             'create_nav_link_proxy', 'set_focus', 'clear_focus',
             'set_blackboard_value', 'get_blackboard_value',
@@ -2562,6 +2639,29 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
         transitionCondition: { type: 'string', description: 'Condition expression for transition.' },
         stateTaskClass: { type: 'string', description: 'Task class for state.' },
         stateEvaluatorClass: { type: 'string', description: 'Evaluator class for state.' },
+        taskStructName: { type: 'string', description: 'USTRUCT name for State Tree task (e.g., FStateTreeDelayTask, FCanopyReportState). Used by add_state_tree_task.' },
+        schemaClass: { type: 'string', description: 'Schema class name for State Tree (e.g., UStateTreeComponentSchema, UCanopyStateTreeSchema). Used by set_state_tree_schema.' },
+        taskProperties: { type: 'object', description: 'Key-value pairs to set on the task struct after adding it.' },
+        sourceTaskStruct: { type: 'string', description: 'Source task USTRUCT name for property binding (e.g., FCanopyReadWorldState). Used by add_state_tree_binding.' },
+        sourcePropertyPath: { type: 'string', description: 'Source property path for binding (e.g., VectorValue). Used by add_state_tree_binding.' },
+        targetTaskStruct: { type: 'string', description: 'Target task USTRUCT name for property binding (e.g., FCanopySimpleMoveTask). Used by add_state_tree_binding.' },
+        targetPropertyPath: { type: 'string', description: 'Target property path for binding (e.g., TargetLocation). Used by add_state_tree_binding.' },
+        sourceTaskIndex: { type: 'number', description: 'Optional: source task index (0-based) if multiple tasks of same struct exist. Used by add_state_tree_binding.' },
+        targetTaskIndex: { type: 'number', description: 'Optional: target task index (0-based) if multiple tasks of same struct exist. Used by add_state_tree_binding.' },
+        parentStateName: { type: 'string', description: 'Parent state name for add_state_tree_state (default: Root).' },
+        stateType: { type: 'string', enum: ['State', 'Group', 'Linked', 'LinkedAsset'], description: 'Type of state to add.' },
+        completionType: { type: 'string', enum: ['Succeeded', 'Failed'], description: 'Deprecated: use trigger instead. Completion type for finish tasks; for state tree transitions, maps to trigger=OnStateSucceeded/OnStateFailed.' },
+        trigger: {
+          type: 'string',
+          enum: ['OnStateCompleted', 'OnStateSucceeded', 'OnStateFailed', 'OnTick', 'OnEvent'],
+          description: 'Trigger for add_state_tree_transition. OnStateCompleted fires on both succeeded and failed.'
+        },
+        transitionType: {
+          type: 'string',
+          enum: ['GotoState', 'NextState', 'NextSelectableState', 'Succeeded', 'Failed', 'None'],
+          description: 'Transition target type for add_state_tree_transition. GotoState requires toState. Succeeded/Failed exit the tree with that status. NextState/NextSelectableState advance to a sibling. None is a no-op. Default: GotoState.'
+        },
+        transitionId: { type: 'string', description: 'Transition GUID for remove_state_tree_transition. Get from get_state_tree_info. Optional when the source state has exactly one transition.' },
         definitionPath: commonSchemas.definitionPath,
         slotIndex: { type: 'number', description: 'Index of slot to configure.' },
         slotOffset: {
@@ -3103,7 +3203,27 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
   {
     name: 'manage_widget_authoring',
     category: 'utility',
-    description: 'Create UMG widgets: buttons, text, images, sliders. Configure layouts, bindings, animations. Build HUDs and menus.',
+    description: `Create and modify UMG Widget Blueprints. All actions require widgetPath (e.g. "/Game/UI/WBP_MyWidget"). Target widgets by name or widgetIndex.
+
+INSPECTION: get_widget_info returns full hierarchy. screenshot_widget renders to PNG.
+
+ADDING WIDGETS: add_text_block, add_image, add_button, add_progress_bar, add_border, add_canvas_panel, add_horizontal_box, add_vertical_box, add_overlay, etc. Use parentSlot for nesting.
+add_widget_component adds ANY widget type (C++ or Blueprint): componentType="Widget_HealthBar" or componentClass="/Game/UI/WBP_Custom".
+
+CANVAS SLOT (widgets inside CanvasPanel): set_anchor handles ALL canvas slot properties atomically in ONE call: anchorMinX, anchorMinY, anchorMaxX, anchorMaxY, posX, posY, sizeX, sizeY, autoSize, alignment:{x,y}. Use set_anchor for EVERYTHING canvas-related. Stretch fill: anchorMinX:0, anchorMinY:0, anchorMaxX:1, anchorMaxY:1 (auto-zeros pos/size). Center: anchorMinX:0.5, anchorMinY:0.5, anchorMaxX:0.5, anchorMaxY:0.5, alignment:{x:0.5,y:0.5}, autoSize:true.
+
+BOX/OVERLAY SLOT (widgets inside HBox/VBox/Overlay): set_slot with sizeRule (Auto/Fill), fillWeight, horizontalAlignment (Left/Center/Right/Fill), verticalAlignment. NOT for Canvas children.
+
+STYLING (set_style): Pass params at TOP LEVEL (not inside a "properties" string).
+  UBorder: brushColor/backgroundColor:{r,g,b,a}, padding (number or {left,top,right,bottom}), texturePath, drawAs.
+  UImage: colorAndOpacity/color/tint:{r,g,b,a}, brush/texturePath (texture asset path), drawAs, imageSize:{x,y}.
+  UTextBlock: color/textColor:{r,g,b,a}, fontSize, bold, shadowColor, shadowOffset:{x,y}, justification, autoWrap.
+  UButton: normalColor/normal:{r,g,b,a}, hoveredColor, pressedColor, disabledColor.
+  UProgressBar: fillColor:{r,g,b,a}, percent.
+  All: opacity (0-1).
+Color format: {r:0.05, g:0.05, b:0.08, a:0.95} (0-1 range).
+
+MANAGEMENT: remove_widget, rename_widget, reparent_widget (newParent/parentSlot).`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -3141,6 +3261,7 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
             'set_size',
             'set_padding',
             'set_z_order',
+            'set_slot',
             'set_render_transform',
             'set_visibility',
             'set_style',
@@ -3173,15 +3294,39 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
             'create_inventory_ui',
             'create_dialog_widget',
             'create_radial_menu',
+            'create_credits_screen',
+            'create_shop_ui',
+            'create_widget_style',
             'get_widget_info',
-            'preview_widget'
+            'get_widget_slot_info',
+            'get_animation_info',
+            'preview_widget',
+            'remove_widget',
+            'rename_widget',
+            'reparent_widget',
+            'add_safe_zone',
+            'add_spacer',
+            'add_widget_switcher',
+            'add_widget_component',
+            'add_quest_tracker',
+            'set_font',
+            'set_margin',
+            'set_widget_binding',
+            'set_animation_speed',
+            'set_localization_key',
+            'apply_style_to_widget',
+            'bind_localized_text',
+            'delete_animation',
+            'screenshot_widget',
+            'validate_widget_blueprint'
           ],
-          description: 'The widget authoring action to perform.'
+          description: 'Action to perform. IMPORTANT: set_slot is for HBox/VBox/Overlay slots ONLY. For Canvas slots use set_anchor which handles ALL properties atomically (anchorMinX/MaxX/MinY/MaxY, posX, posY, sizeX, sizeY, autoSize, alignment). set_style params go at top level (brushColor:{r,g,b,a}, fontSize, bold, etc.) NOT inside a properties string. All add_* actions accept name param for the widget name.'
         },
         name: commonSchemas.name,
         folder: commonSchemas.directoryPath,
         widgetPath: commonSchemas.widgetPath,
         slotName: commonSchemas.slotName,
+        widgetIndex: { type: 'number', description: 'Widget index (from get_widget_info) for unambiguous targeting when multiple widgets share the same name.' },
         parentSlot: { type: 'string', description: 'Parent slot to add widget to.' },
         parentClass: commonSchemas.parentClass,
         anchorMin: {
@@ -3199,18 +3344,27 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
           properties: commonSchemas.vector2.properties,
           description: 'Widget alignment (0-1).'
         },
+        anchorMinX: { type: 'number', description: 'Canvas anchor minimum X (0-1). Use with set_anchor.' },
+        anchorMinY: { type: 'number', description: 'Canvas anchor minimum Y (0-1). Use with set_anchor.' },
+        anchorMaxX: { type: 'number', description: 'Canvas anchor maximum X (0-1). Use with set_anchor.' },
+        anchorMaxY: { type: 'number', description: 'Canvas anchor maximum Y (0-1). Use with set_anchor.' },
         alignmentX: { type: 'number', description: 'Horizontal alignment (0-1).' },
         alignmentY: { type: 'number', description: 'Vertical alignment (0-1).' },
-        positionX: { type: 'number', description: 'X position.' },
-        positionY: { type: 'number', description: 'Y position.' },
+        positionX: { type: 'number', description: 'X position. Alias: posX.' },
+        positionY: { type: 'number', description: 'Y position. Alias: posY.' },
+        posX: { type: 'number', description: 'Canvas slot X offset from anchor. Use with set_anchor for atomic update.' },
+        posY: { type: 'number', description: 'Canvas slot Y offset from anchor. Use with set_anchor for atomic update.' },
         sizeX: { type: 'number', description: 'Width.' },
         sizeY: { type: 'number', description: 'Height.' },
         sizeToContent: { type: 'boolean', description: 'Size to content.' },
+        autoSize: { type: 'boolean', description: 'Canvas slot auto-size to content. Defaults to true when adding widgets. Set false for explicit sizing.' },
         left: { type: 'number', description: 'Left padding.' },
         top: { type: 'number', description: 'Top padding.' },
         right: { type: 'number', description: 'Right padding.' },
         bottom: { type: 'number', description: 'Bottom padding.' },
         zOrder: { type: 'number', description: 'Z-order for canvas slot.' },
+        sizeRule: { type: 'string', enum: ['Auto', 'Fill'], description: 'Slot size rule for HBox/VBox children. Auto = size to content, Fill = expand to fill available space.' },
+        fillWeight: { type: 'number', description: 'Fill weight when sizeRule is Fill (default 1.0). Higher values take more space proportionally.' },
         translation: {
           type: 'object',
           properties: commonSchemas.vector2.properties,
@@ -3479,7 +3633,28 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
           description: 'Preview resolution preset.'
         },
         customWidth: { type: 'number', description: 'Custom preview width.' },
-        customHeight: { type: 'number', description: 'Custom preview height.' }
+        customHeight: { type: 'number', description: 'Custom preview height.' },
+        newName: { type: 'string', description: 'New name for rename_widget.' },
+        newParent: { type: 'string', description: 'New parent widget name for reparent_widget.' },
+        fontFamily: { type: 'string', description: 'Font family name or asset path for set_font.' },
+        fontWeight: { type: 'string', enum: ['Regular', 'Bold', 'Light', 'Italic', 'BoldItalic'], description: 'Font weight/typeface.' },
+        outlineSize: { type: 'number', description: 'Font outline size.' },
+        outlineColor: { type: 'object', properties: commonSchemas.colorObject.properties, description: 'Font outline color.' },
+        marginLeft: { type: 'number', description: 'Left margin.' },
+        marginTop: { type: 'number', description: 'Top margin.' },
+        marginRight: { type: 'number', description: 'Right margin.' },
+        marginBottom: { type: 'number', description: 'Bottom margin.' },
+        uniformMargin: { type: 'number', description: 'Uniform margin for all sides.' },
+        speed: { type: 'number', description: 'Animation playback speed.' },
+        localizationKey: { type: 'string', description: 'String table key for localization.' },
+        stringTableId: { type: 'string', description: 'String table ID for localization.' },
+        styleName: { type: 'string', description: 'Style name for create/apply style.' },
+        componentClass: { type: 'string', description: 'Widget component class for add_widget_component. Alias for componentType.' },
+        componentType: { type: 'string', description: 'Widget type for add_widget_component. Standard types (TextBlock, Button, Image, ProgressBar, etc.), C++ class names, or Blueprint widget asset paths (e.g. /Game/UI/WBP_MyWidget).' },
+        spacerSize: { type: 'number', description: 'Spacer size.' },
+        width: { type: 'number', description: 'Render width for screenshot_widget (default 1920).' },
+        height: { type: 'number', description: 'Render height for screenshot_widget (default 1080).' },
+        filename: { type: 'string', description: 'Output filename for screenshot_widget.' }
       },
       required: ['action']
     },
@@ -4696,6 +4871,351 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
         },
         scatteredMeshes: { type: 'number', description: 'Number of meshes scattered along spline.' },
         error: commonSchemas.stringProp
+      }
+    }
+  },
+
+  // ============================================================================
+  // DATA TABLE MANAGEMENT
+  // ============================================================================
+  {
+    name: 'manage_data_table',
+    category: 'core',
+    description: 'Create and edit UDataTable assets. Actions: create_data_table, list_rows, get_row, add_row, edit_row, remove_row, get_structure, import_json, export_json.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: [
+            'create_data_table',
+            'list_rows', 'get_row', 'add_row', 'edit_row', 'remove_row',
+            'get_structure', 'import_json', 'export_json'
+          ],
+          description: 'Data table action to perform.'
+        },
+        tablePath: { type: 'string', description: 'Asset path of the data table (e.g. /Game/Data/WeaponStats).' },
+        structType: { type: 'string', description: 'Row struct type for create_data_table (e.g. /Script/MyProject.FWeaponRow or a built-in struct path).' },
+        rowName: { type: 'string', description: 'Row name for get_row, add_row, edit_row, remove_row.' },
+        rowData: { type: 'object', description: 'Column values as JSON object for add_row and edit_row.' },
+        jsonData: { type: 'string', description: 'JSON string for import_json (array of objects with __rowName field).' }
+      },
+      required: ['action']
+    },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        ...commonSchemas.outputBase,
+        rows: { type: 'array', items: { type: 'object' }, description: 'Row data for list/export operations.' },
+        row: { type: 'object', description: 'Single row data.' },
+        columns: { type: 'array', items: { type: 'object' }, description: 'Column definitions for get_structure.' },
+        rowCount: { type: 'number', description: 'Number of rows in the table.' }
+      }
+    }
+  },
+
+  // ============================================================================
+  // GAMEPLAY TAG MANAGEMENT
+  // ============================================================================
+  {
+    name: 'manage_gameplay_tags',
+    category: 'core',
+    description: 'Manage gameplay tags: project dictionary and actor assignments. Actions: add_tag, remove_tag, list_tags, get_tag_children, has_tag, add_tag_to_actor, remove_tag_from_actor, get_actor_tags, get_tag_hierarchy.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: [
+            'add_tag', 'remove_tag', 'list_tags', 'get_tag_children', 'has_tag',
+            'add_tag_to_actor', 'remove_tag_from_actor', 'get_actor_tags',
+            'get_tag_hierarchy'
+          ],
+          description: 'Gameplay tag action to perform.'
+        },
+        tag: { type: 'string', description: 'Gameplay tag string (e.g. "Character.State.Dead"). Dot-separated hierarchy.' },
+        prefix: { type: 'string', description: 'Filter prefix for list_tags (e.g. "Character" lists all Character.* tags).' },
+        actorName: commonSchemas.actorName,
+        description: { type: 'string', description: 'Description for add_tag.' }
+      },
+      required: ['action']
+    },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        ...commonSchemas.outputBase,
+        tags: { type: 'array', items: { type: 'string' }, description: 'List of tag names.' },
+        exists: { type: 'boolean', description: 'Whether the tag exists (has_tag).' },
+        hierarchy: { type: 'object', description: 'Nested tag hierarchy (get_tag_hierarchy).' }
+      }
+    }
+  },
+
+  // ============================================================================
+  // manage_data_asset — General-purpose data asset CRUD
+  // ============================================================================
+  {
+    name: 'manage_data_asset',
+    category: 'core',
+    description: `Create, read, edit, and manage UDataAsset / UPrimaryDataAsset instances and UCurveFloat assets.
+
+set_data_asset_properties supports struct arrays via FJsonObjectConverter.
+set_curve_keys / get_curve_keys: read/write keys on UCurveFloat assets.
+  set_curve_keys: assetPath, keys: [{time: 1, value: 100}, {time: 5, value: 500}], append: false
+  get_curve_keys: assetPath -> returns keys array with time, value, interpMode, tangents
+
+Array mutation actions (TArray<T> on a data asset, where T may be a UStruct or primitive):
+  append_array_item: assetPath, propertyName, value -> push value to end of array
+  insert_array_item: assetPath, propertyName, index, value -> insert at index
+  remove_array_item_at: assetPath, propertyName, index -> remove element at index
+  remove_array_item_where: assetPath, propertyName, matchKey, matchValue -> remove first match
+  update_array_item: assetPath, propertyName, matchKey, matchValue, newValue -> replace first match
+  matchKey is a dotted path on struct elements (e.g. "Key.TagName"); leave empty for primitive arrays.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: [
+            'create_data_asset', 'create_data_asset_blueprint',
+            'get_data_asset_properties', 'set_data_asset_properties',
+            'list_data_assets', 'duplicate_data_asset',
+            'get_curve_keys', 'set_curve_keys',
+            'append_array_item', 'insert_array_item',
+            'remove_array_item_at', 'remove_array_item_where',
+            'update_array_item'
+          ],
+          description: 'The data asset action to perform.'
+        },
+        assetName: { type: 'string', description: 'Name for the new data asset.' },
+        folderPath: { type: 'string', description: 'Folder path (e.g., /Game/DataAssets).' },
+        assetPath: { type: 'string', description: 'Path to an existing data asset.' },
+        className: { type: 'string', description: 'Class name or path for data asset type (e.g., /Script/Engine.PrimaryDataAsset).' },
+        parentClass: { type: 'string', description: 'Parent class for create_data_asset_blueprint (default: PrimaryDataAsset).' },
+        properties: { type: 'object', description: 'Key-value pairs of UPROPERTY names and values to set.' },
+        filter: { type: 'string', description: 'Class filter for list_data_assets.' },
+        searchPath: { type: 'string', description: 'Content path to search in for list_data_assets.' },
+        newName: { type: 'string', description: 'New asset name for duplicate_data_asset.' },
+        newPath: { type: 'string', description: 'Destination folder for duplicate_data_asset.' },
+        keys: { type: 'array', items: { type: 'object' }, description: 'Curve keys array for set_curve_keys. Each key: {time: number, value: number, interpMode?: "Linear"|"Constant"|"Cubic"}' },
+        append: { type: 'boolean', description: 'For set_curve_keys: append to existing keys (true) or replace all (false, default).' },
+        propertyName: { type: 'string', description: 'TArray UPROPERTY name on the data asset, used by array mutation actions.' },
+        index: { type: 'number', description: 'Array index for insert_array_item / remove_array_item_at.' },
+        value: { description: 'Element value for append_array_item / insert_array_item. Accepts JSON object for struct elements (deserialized via FJsonObjectConverter), or primitive for simple-typed arrays.' },
+        newValue: { description: 'Replacement value for update_array_item. Same format as value.' },
+        matchKey: { type: 'string', description: 'Dotted property path on struct elements for remove_array_item_where / update_array_item (e.g. "Key.TagName"). Omit for primitive arrays.' },
+        matchValue: { type: 'string', description: 'Value to match (compared against ExportText output) for remove_array_item_where / update_array_item.' }
+      },
+      required: ['action']
+    },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        ...commonSchemas.outputBase,
+        assetPath: { type: 'string', description: 'Path to the created/modified asset.' },
+        className: { type: 'string', description: 'Class name of the data asset.' },
+        properties: { type: 'object', description: 'Property values from get_data_asset_properties.' },
+        assets: { type: 'array', items: { type: 'object' }, description: 'List of data assets from list_data_assets.' }
+      }
+    }
+  },
+
+  // ============================================================================
+  // manage_layers — Actor layer organization
+  // ============================================================================
+  {
+    name: 'manage_layers',
+    category: 'core',
+    description: 'Manage editor layers for actor organization. Actions: create_layer, delete_layer, rename_layer, list_layers, add_actor_to_layer, remove_actor_from_layer, get_actor_layers, set_layer_visibility, get_layer_actors.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: [
+            'create_layer', 'delete_layer', 'rename_layer', 'list_layers',
+            'add_actor_to_layer', 'remove_actor_from_layer', 'get_actor_layers',
+            'set_layer_visibility', 'get_layer_actors'
+          ],
+          description: 'The layer action to perform.'
+        },
+        layerName: { type: 'string', description: 'Name of the layer.' },
+        newName: { type: 'string', description: 'New name for rename_layer.' },
+        actorName: { type: 'string', description: 'Actor name/label for add/remove/get operations.' },
+        visible: { type: 'boolean', description: 'Visibility state for set_layer_visibility.' }
+      },
+      required: ['action']
+    },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        ...commonSchemas.outputBase,
+        layers: { type: 'array', items: { type: 'string' }, description: 'List of layer names.' },
+        actors: { type: 'array', items: { type: 'object' }, description: 'Actors in a layer.' }
+      }
+    }
+  },
+
+  // ============================================================================
+  // manage_blueprint_interface — Blueprint Interface CRUD
+  // ============================================================================
+  {
+    name: 'manage_blueprint_interface',
+    category: 'authoring',
+    description: 'Create and manage Blueprint Interfaces. Actions: create_blueprint_interface, add_function, remove_function, list_functions, implement_interface, remove_interface, list_interfaces.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: [
+            'create_blueprint_interface', 'add_function', 'remove_function',
+            'list_functions', 'implement_interface', 'remove_interface', 'list_interfaces'
+          ],
+          description: 'The blueprint interface action to perform.'
+        },
+        assetName: { type: 'string', description: 'Name for the new interface asset.' },
+        folderPath: { type: 'string', description: 'Folder path for creation.' },
+        interfacePath: { type: 'string', description: 'Path to the interface asset.' },
+        blueprintPath: { type: 'string', description: 'Path to the Blueprint to modify.' },
+        functionName: { type: 'string', description: 'Function name for add/remove.' },
+        inputs: { type: 'array', items: { type: 'object' }, description: 'Input parameters for add_function: [{name, type}].' },
+        outputs: { type: 'array', items: { type: 'object' }, description: 'Output parameters for add_function: [{name, type}].' }
+      },
+      required: ['action']
+    },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        ...commonSchemas.outputBase,
+        assetPath: { type: 'string', description: 'Path to the interface asset.' },
+        functions: { type: 'array', items: { type: 'object' }, description: 'Functions in the interface.' },
+        interfaces: { type: 'array', items: { type: 'string' }, description: 'Interfaces on a Blueprint.' }
+      }
+    }
+  },
+
+  // ============================================================================
+  // manage_physics_material — Physical material CRUD
+  // ============================================================================
+  {
+    name: 'manage_physics_material',
+    category: 'gameplay',
+    description: 'Create and manage UPhysicalMaterial assets. Actions: create_physics_material, set_physics_material_properties, get_physics_material_properties, list_physics_materials, assign_physics_material.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: [
+            'create_physics_material', 'set_physics_material_properties',
+            'get_physics_material_properties', 'list_physics_materials',
+            'assign_physics_material'
+          ],
+          description: 'The physics material action to perform.'
+        },
+        assetName: { type: 'string', description: 'Name for the new physics material.' },
+        folderPath: { type: 'string', description: 'Folder path for creation.' },
+        assetPath: { type: 'string', description: 'Path to an existing physics material.' },
+        friction: { type: 'number', description: 'Friction coefficient (0-1).' },
+        staticFriction: { type: 'number', description: 'Static friction override.' },
+        restitution: { type: 'number', description: 'Bounciness (0-1).' },
+        density: { type: 'number', description: 'Material density.' },
+        surfaceType: { type: 'string', description: 'Physical surface type enum name.' },
+        actorName: { type: 'string', description: 'Actor to assign material to.' },
+        componentName: { type: 'string', description: 'Component to assign material to.' }
+      },
+      required: ['action']
+    },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        ...commonSchemas.outputBase,
+        assetPath: { type: 'string', description: 'Path to the physics material.' },
+        properties: { type: 'object', description: 'Physics material properties.' },
+        materials: { type: 'array', items: { type: 'object' }, description: 'List of physics materials.' }
+      }
+    }
+  },
+
+  // ============================================================================
+  // manage_string_table — String table / localization management
+  // ============================================================================
+  {
+    name: 'manage_string_table',
+    category: 'core',
+    description: 'Create and manage FStringTable assets for UI text and localization. Actions: create_string_table, add_entry, remove_entry, edit_entry, get_entry, list_entries, import_json, export_json, list_string_tables.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: [
+            'create_string_table', 'add_entry', 'remove_entry', 'edit_entry',
+            'get_entry', 'list_entries', 'import_json', 'export_json', 'list_string_tables'
+          ],
+          description: 'The string table action to perform.'
+        },
+        assetName: { type: 'string', description: 'Name for the new string table.' },
+        folderPath: { type: 'string', description: 'Folder path for creation.' },
+        assetPath: { type: 'string', description: 'Path to an existing string table asset.' },
+        tableNamespace: { type: 'string', description: 'Namespace for the string table.' },
+        key: { type: 'string', description: 'String key for add/remove/edit/get.' },
+        value: { type: 'string', description: 'String value for add/edit.' },
+        jsonData: { type: 'string', description: 'JSON string of key-value pairs for import_json.' },
+        searchPath: { type: 'string', description: 'Content path to search for list_string_tables.' }
+      },
+      required: ['action']
+    },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        ...commonSchemas.outputBase,
+        assetPath: { type: 'string', description: 'Path to the string table asset.' },
+        entries: { type: 'object', description: 'Key-value entries from list/export.' },
+        value: { type: 'string', description: 'String value for get_entry.' },
+        tables: { type: 'array', items: { type: 'object' }, description: 'List of string table assets.' }
+      }
+    }
+  },
+
+  // ============================================================================
+  // manage_anim_notify — Animation notify management
+  // ============================================================================
+  {
+    name: 'manage_anim_notify',
+    category: 'gameplay',
+    description: 'Manage animation notifies on UAnimSequence/UAnimMontage. Actions: add_notify, add_notify_state, remove_notify, list_notifies, set_notify_properties, list_notify_classes.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: [
+            'add_notify', 'add_notify_state', 'remove_notify',
+            'list_notifies', 'set_notify_properties', 'list_notify_classes'
+          ],
+          description: 'The animation notify action to perform.'
+        },
+        assetPath: { type: 'string', description: 'Path to the animation asset (AnimSequence or AnimMontage).' },
+        notifyClass: { type: 'string', description: 'Class name of the notify (e.g., AnimNotify_PlaySound, AnimNotify_PlayParticleEffect).' },
+        notifyName: { type: 'string', description: 'Display name for the notify.' },
+        time: { type: 'number', description: 'Trigger time in seconds for add_notify.' },
+        beginTime: { type: 'number', description: 'Start time for add_notify_state.' },
+        endTime: { type: 'number', description: 'End time for add_notify_state.' },
+        trackIndex: { type: 'integer', description: 'Notify track index (0-based).' },
+        notifyIndex: { type: 'integer', description: 'Index of notify to remove/modify.' },
+        properties: { type: 'object', description: 'Properties to set on the notify.' }
+      },
+      required: ['action']
+    },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        ...commonSchemas.outputBase,
+        notifies: { type: 'array', items: { type: 'object' }, description: 'List of notifies on the asset.' },
+        classes: { type: 'array', items: { type: 'string' }, description: 'Available notify classes.' },
+        notifyIndex: { type: 'integer', description: 'Index of added/modified notify.' }
       }
     }
   }
