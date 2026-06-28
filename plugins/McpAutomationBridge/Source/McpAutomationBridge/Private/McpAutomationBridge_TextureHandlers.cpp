@@ -13,7 +13,7 @@
 #include "TextureResource.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetToolsModule.h"
-#include "Factories/Texture2DFactoryNew.h"
+#include "Factories/Texture2dFactoryNew.h"
 // UObject/SavePackage.h is not needed - using McpSafeAssetSave() from helpers instead
 #include "Misc/PackageName.h"
 #include "HAL/PlatformFileManager.h"

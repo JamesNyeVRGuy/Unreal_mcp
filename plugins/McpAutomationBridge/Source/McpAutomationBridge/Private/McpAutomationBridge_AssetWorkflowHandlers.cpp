@@ -11,7 +11,7 @@
 #include "Misc/ScopeExit.h"
 #include "UObject/MetaData.h"
 
-#include "HAL/PlatformFilemanager.h"
+#include "HAL/PlatformFileManager.h"
 #include "Misc/Paths.h"
 
 // Material expression includes
