@@ -12,6 +12,7 @@
 #include "StateTreeState.h"
 #if __has_include("Components/StateTreeComponentSchema.h")
 #include "Components/StateTreeComponentSchema.h"
+#include "StateTreeSchema.h"
 #define MCP_STATE_TREE_COMPONENT_SCHEMA_AVAILABLE 1
 #else
 #define MCP_STATE_TREE_COMPONENT_SCHEMA_AVAILABLE 0

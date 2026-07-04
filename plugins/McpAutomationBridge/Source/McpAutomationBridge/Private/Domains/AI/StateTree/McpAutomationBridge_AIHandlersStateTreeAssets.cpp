@@ -80,13 +80,48 @@ bool HandleCreateStateTree(UMcpAutomationBridgeSubsystem* Self, const FString& R
         }
         StateTree->EditorData = EditorData;
 
-        // Assign schema based on type
+        // Assign schema. Priority:
+        //   1. explicit schemaClass parameter (full class path, e.g.
+        //      "/Script/CanopyRuntime.CanopyStateTreeSchema") -- loads the
+        //      class and instantiates it. This is what lets consumers wire
+        //      project-specific schemas that carry the parameter set /
+        //      context types their tasks + evaluators expect.
+        //   2. schemaType == "Component" (default) -- falls through to the
+        //      built-in UStateTreeComponentSchema.
+        //   3. schema unavailable at build time -- skip, ST will use whatever
+        //      default the engine picks (rare, older engines only).
+        {
+            const FString SchemaClassPath = GetStringFieldAI(Payload, TEXT("schemaClass"), TEXT(""));
+            bool bSchemaAssigned = false;
+            if (!SchemaClassPath.IsEmpty())
+            {
+                UClass* SchemaClass = StaticLoadClass(UStateTreeSchema::StaticClass(),
+                    nullptr, *SchemaClassPath);
+                if (SchemaClass)
+                {
+                    EditorData->Schema = NewObject<UStateTreeSchema>(EditorData, SchemaClass);
+                    bSchemaAssigned = (EditorData->Schema != nullptr);
+                    if (!bSchemaAssigned)
+                    {
+                        UE_LOG(LogMcpAIHandlers, Warning,
+                            TEXT("HandleCreateStateTree: NewObject failed for schemaClass=%s; falling back to Component schema"),
+                            *SchemaClassPath);
+                    }
+                }
+                else
+                {
+                    UE_LOG(LogMcpAIHandlers, Warning,
+                        TEXT("HandleCreateStateTree: could not StaticLoadClass schemaClass=%s; falling back to Component schema"),
+                        *SchemaClassPath);
+                }
+            }
+            if (!bSchemaAssigned)
+            {
 #if MCP_STATE_TREE_COMPONENT_SCHEMA_AVAILABLE
-        EditorData->Schema = NewObject<UStateTreeComponentSchema>(EditorData);
-#else
-        // UE 5.7+ or schema not available - skip schema assignment
-        // The StateTree will use a default schema or require manual configuration
+                EditorData->Schema = NewObject<UStateTreeComponentSchema>(EditorData);
 #endif
+            }
+        }
         // Add a default root state
         UStateTreeState& RootState = EditorData->AddRootState();
         RootState.Name = FName(TEXT("Root"));
@@ -97,6 +132,11 @@ bool HandleCreateStateTree(UMcpAutomationBridgeSubsystem* Self, const FString& R
         Result->SetStringField(TEXT("stateTreePath"), FullPath);
         Result->SetStringField(TEXT("rootStateName"), TEXT("Root"));
         Result->SetStringField(TEXT("message"), TEXT("State Tree created with root state"));
+        // Echo the schema so callers can verify the wiring worked without a
+        // separate inspect call (helps the schemaClass parameter path prove
+        // itself in the response).
+        Result->SetStringField(TEXT("schema"),
+            EditorData->Schema ? EditorData->Schema->GetClass()->GetPathName() : TEXT(""));
         McpHandlerUtils::AddVerification(Result, StateTree);
         Self->SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("State Tree created"), Result);
 #elif MCP_HAS_STATE_TREE
