@@ -3,6 +3,15 @@
 #if WITH_EDITOR
 #include "Domains/AI/StateTree/McpAutomationBridge_AIStateTreeFeature.h"
 
+// Explicit includes for the types Gate 2 references. The shared feature
+// header pulls these in too under nested __has_include guards, but a direct
+// include here removes any inclusion-order fragility for translation units
+// that reach FStateTreeTaskBase / FStateTreeEditorNode.
+#if MCP_HAS_STATE_TREE && MCP_STATE_TREE_HEADERS_AVAILABLE
+#include "StateTreeTaskBase.h"
+#include "StateTreeEditorNode.h"
+#endif
+
 namespace McpAIHandlers
 {
 bool HandleConfigureStateTreeTask(UMcpAutomationBridgeSubsystem* Self, const FString& RequestId, const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> RequestingSocket)
@@ -70,6 +79,59 @@ bool HandleConfigureStateTreeTask(UMcpAutomationBridgeSubsystem* Self, const FSt
             return true;
         }
 
+        // Optional: insert a C++ StateTree task node onto the found state.
+        // Consumers set nodeClass to a full struct path
+        // (e.g. "/Script/CanopyDemo.CanopyAntForageTask") to add a task that
+        // derives from FStateTreeTaskBase. The task's instance data is auto-
+        // initialised from its FStateTreeNodeBase::GetInstanceDataType() (the
+        // same pattern StateTreeState.h::AddTask<T>() uses). Instance data
+        // property values from a "properties" payload object are wired up in
+        // Gate 3; Gate 2 here inserts the task with default-constructed
+        // instance data.
+        FString AddedNodeClassPath;
+        FGuid   AddedNodeId;
+        bool    bTaskAdded = false;
+        {
+            const FString NodeClass = GetStringFieldAI(Payload, TEXT("nodeClass"), TEXT(""));
+            if (!NodeClass.IsEmpty())
+            {
+                UScriptStruct* TaskStruct = LoadObject<UScriptStruct>(nullptr, *NodeClass);
+                if (!TaskStruct)
+                {
+                    TaskStruct = FindObject<UScriptStruct>(nullptr, *NodeClass);
+                }
+                if (!TaskStruct)
+                {
+                    Self->SendAutomationError(RequestingSocket, RequestId,
+                        FString::Printf(TEXT("Task nodeClass not found: %s"), *NodeClass),
+                        TEXT("NOT_FOUND"));
+                    return true;
+                }
+                if (!TaskStruct->IsChildOf(FStateTreeTaskBase::StaticStruct()))
+                {
+                    Self->SendAutomationError(RequestingSocket, RequestId,
+                        FString::Printf(TEXT("nodeClass is not FStateTreeTaskBase-derived: %s"), *NodeClass),
+                        TEXT("INVALID_ARGUMENT"));
+                    return true;
+                }
+
+                FStateTreeEditorNode& TaskItem = FoundState->Tasks.AddDefaulted_GetRef();
+                TaskItem.ID = FGuid::NewGuid();
+                TaskItem.Node.InitializeAs(TaskStruct);
+                const FStateTreeNodeBase& NodeRef = TaskItem.Node.GetMutable<FStateTreeNodeBase>();
+                if (const UScriptStruct* InstanceType =
+                        Cast<const UScriptStruct>(NodeRef.GetInstanceDataType()))
+                {
+                    TaskItem.Instance.InitializeAs(InstanceType);
+                }
+                // Gate 3: apply Payload->"properties" onto TaskItem.Instance here.
+
+                AddedNodeClassPath = TaskStruct->GetPathName();
+                AddedNodeId        = TaskItem.ID;
+                bTaskAdded         = true;
+            }
+        }
+
         // Configure state properties from payload
         if (Payload->HasField(TEXT("selectionBehavior")))
         {
@@ -117,8 +179,15 @@ bool HandleConfigureStateTreeTask(UMcpAutomationBridgeSubsystem* Self, const FSt
 
         Result->SetStringField(TEXT("stateName"), StateName);
         Result->SetNumberField(TEXT("taskCount"), FoundState->Tasks.Num());
-        Result->SetStringField(TEXT("message"), TEXT("State task configuration updated"));
-        Self->SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Task configured"), Result);
+        if (bTaskAdded)
+        {
+            Result->SetStringField(TEXT("addedNodeClass"), AddedNodeClassPath);
+            Result->SetStringField(TEXT("addedNodeId"),    AddedNodeId.ToString());
+        }
+        Result->SetStringField(TEXT("message"),
+            bTaskAdded ? TEXT("Task added to state") : TEXT("State task configuration updated"));
+        Self->SendAutomationResponse(RequestingSocket, RequestId, true,
+            bTaskAdded ? TEXT("Task added") : TEXT("Task configured"), Result);
 #elif MCP_HAS_STATE_TREE
         FString StateTreePath = GetStringFieldAI(Payload, TEXT("stateTreePath"));
         FString StateName = GetStringFieldAI(Payload, TEXT("stateName"));
