@@ -37,16 +37,30 @@ inline bool McpSafeLevelSave(ULevel* Level, const FString& FullPath, int32 MaxRe
     }
 
     FString PackagePath = FullPath;
-    if (!PackagePath.StartsWith(TEXT("/Game/")))
+    if (!PackagePath.StartsWith(TEXT("/")))
     {
-        if (!PackagePath.StartsWith(TEXT("/")))
-        {
-            PackagePath = TEXT("/Game/") + PackagePath;
-        }
-        else
+        // Bare name like "MyLevel" -- prepend /Game/ as a sensible default.
+        PackagePath = TEXT("/Game/") + PackagePath;
+    }
+    else
+    {
+        // Absolute package path -- accept any MOUNTED content root, not just
+        // /Game/. Plugin content mounts like /Canopy/, /AutomationKit/, etc.
+        // are valid UE package roots; rejecting them here forces every level
+        // into the project Content folder, which defeats per-plugin test
+        // organisation. We delegate to FPackageName::TryConvertLongPackageName
+        // ToFilename as the authoritative mount-point check -- if it can't
+        // resolve to a filename, no content mount owns this path and the save
+        // would fail downstream anyway. This is the same API used at the
+        // actual SaveLevel call below, so we're just front-loading the check
+        // to fail fast with a clear message.
+        FString MountCheckFilename;
+        if (!FPackageName::TryConvertLongPackageNameToFilename(PackagePath,
+                MountCheckFilename, FPackageName::GetMapPackageExtension()))
         {
             UE_LOG(LogMcpSafeOperations, Error,
-                TEXT("McpSafeLevelSave: Invalid path (not under /Game/): %s"), *PackagePath);
+                TEXT("McpSafeLevelSave: Path is not under any mounted content root: %s"),
+                *PackagePath);
             return false;
         }
     }
