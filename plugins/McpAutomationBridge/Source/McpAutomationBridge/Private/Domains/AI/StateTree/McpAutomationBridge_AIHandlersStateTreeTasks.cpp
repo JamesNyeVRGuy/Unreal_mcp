@@ -10,6 +10,7 @@
 #if MCP_HAS_STATE_TREE && MCP_STATE_TREE_HEADERS_AVAILABLE
 #include "StateTreeTaskBase.h"
 #include "StateTreeEditorNode.h"
+#include "StateTreeEditingSubsystem.h"
 #include "GameplayTagContainer.h"
 #include "UObject/EnumProperty.h"
 #include "UObject/UnrealType.h"
@@ -460,6 +461,31 @@ bool HandleConfigureStateTreeTask(UMcpAutomationBridgeSubsystem* Self, const FSt
             (void)Behavior; // Suppress unused warning
 #endif
 }
+
+        // Gate 4: compile the StateTree so the runtime side (Nodes, bindings,
+        // LastCompiledEditorDataHash) reflects the editor-data changes we
+        // just made. Without this the ST is authored but never usable at
+        // runtime -- exactly the "Schema: None, Nodes: (), Hash: 0" gap that
+        // motivated the whole MCP-STFULL effort. Uses the same static entry
+        // point the ST editor UI's Compile button hits, so the same
+        // validation + delegate broadcast happens.
+        bool bCompiled = false;
+        {
+            FStateTreeCompilerLog Log;
+            bCompiled = UStateTreeEditingSubsystem::CompileStateTree(StateTree, Log);
+            Result->SetBoolField(TEXT("compiled"), bCompiled);
+            Result->SetNumberField(TEXT("compiledHash"),
+                static_cast<double>(StateTree->LastCompiledEditorDataHash));
+            if (!bCompiled)
+            {
+                // Dump the compile log to LogMcpAIHandlers so the failure
+                // reason (missing binding, invalid enum value, etc.) is
+                // visible in the editor log. Iterating FStateTreeCompilerLog
+                // into a structured response is nice-to-have; the log dump
+                // is the honest fallback for now.
+                Log.DumpToLog(LogMcpAIHandlers);
+            }
+        }
 
         // Save
         McpSafeAssetSave(StateTree);
