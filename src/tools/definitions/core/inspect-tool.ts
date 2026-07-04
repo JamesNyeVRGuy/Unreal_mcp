@@ -14,6 +14,8 @@ export const inspectToolDefinition: ToolDefinition = {
             'inspect_object', 'get_actor_details', 'get_blueprint_details', 'get_mesh_details',
             'get_texture_details', 'get_material_details', 'get_level_details', 'get_component_details',
             'set_property', 'get_property',
+            'call_function',
+            'list_map_entries', 'add_map_entry', 'set_map_entry', 'remove_map_entry',
             'get_components', 'get_component_property', 'set_component_property',
             'inspect_class', 'inspect_cdo', 'runtime_report', 'pie_report', 'list_objects',
             'get_metadata', 'add_tag', 'find_by_tag',
@@ -38,7 +40,10 @@ export const inspectToolDefinition: ToolDefinition = {
         blueprintPath: commonSchemas.blueprintPath,
         detailed: commonSchemas.booleanProp,
         propertyNames: commonSchemas.arrayOfStrings,
-        componentNames: commonSchemas.arrayOfStrings
+        componentNames: commonSchemas.arrayOfStrings,
+        functionName: { type: 'string', description: 'Name of the UFunction to invoke for call_function.' },
+        arguments: { type: 'object', description: 'JSON object of arguments for call_function -- keys match parameter names.', additionalProperties: true },
+        key: { description: 'TMap key value for add/set/remove_map_entry. Type-flexible, matches the key property type.' }
       },
       required: ['action']
     },

@@ -55,7 +55,14 @@ bool UMcpAutomationBridgeSubsystem::HandleInspectAction(
         LowerSubAction.Equals(TEXT("delete_object")) ||
         LowerSubAction.Equals(TEXT("get_bounding_box")) ||
         LowerSubAction.Equals(TEXT("set_property")) ||
-        LowerSubAction.Equals(TEXT("get_property"));
+        LowerSubAction.Equals(TEXT("get_property")) ||
+        // P24 Gate 2: these route through ControlActor's map + call_function
+        // handlers, which now accept objectPath fallback so any UObject works.
+        LowerSubAction.Equals(TEXT("list_map_entries")) ||
+        LowerSubAction.Equals(TEXT("add_map_entry")) ||
+        LowerSubAction.Equals(TEXT("set_map_entry")) ||
+        LowerSubAction.Equals(TEXT("remove_map_entry")) ||
+        LowerSubAction.Equals(TEXT("call_function"));
 
     if (bIsActorAction)
     {

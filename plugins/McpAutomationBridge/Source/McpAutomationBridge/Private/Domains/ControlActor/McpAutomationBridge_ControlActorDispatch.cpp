@@ -123,6 +123,9 @@ bool UMcpAutomationBridgeSubsystem::HandleControlActorAction(
     return HandleControlActorSetCollision(RequestId, Payload, RequestingSocket);
   if (LowerSub == TEXT("call_function") || LowerSub == TEXT("call_actor_function"))
     return HandleControlActorCallFunction(RequestId, Payload, RequestingSocket);
+  if (LowerSub == TEXT("list_map_entries") || LowerSub == TEXT("add_map_entry") ||
+      LowerSub == TEXT("set_map_entry")    || LowerSub == TEXT("remove_map_entry"))
+    return HandleControlActorMapEntries(RequestId, LowerSub, Payload, RequestingSocket);
 
   SendStandardErrorResponse(
       this, RequestingSocket, RequestId, TEXT("UNKNOWN_ACTION"),
