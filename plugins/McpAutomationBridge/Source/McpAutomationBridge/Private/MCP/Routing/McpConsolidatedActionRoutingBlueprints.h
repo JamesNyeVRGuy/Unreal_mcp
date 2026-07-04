@@ -57,7 +57,8 @@ inline const TArray<FString>& WidgetAuthoring()
 		TEXT("add_interaction_prompt"), TEXT("add_objective_tracker"),
 		TEXT("add_damage_indicator"), TEXT("create_inventory_ui"),
 		TEXT("create_dialog_widget"), TEXT("create_radial_menu"),
-		TEXT("get_widget_info"), TEXT("preview_widget"), TEXT("screenshot_widget")
+		TEXT("get_widget_info"), TEXT("preview_widget"), TEXT("screenshot_widget"),
+		TEXT("set_slot"), TEXT("validate_widget_blueprint")
 	};
 	return Actions;
 }

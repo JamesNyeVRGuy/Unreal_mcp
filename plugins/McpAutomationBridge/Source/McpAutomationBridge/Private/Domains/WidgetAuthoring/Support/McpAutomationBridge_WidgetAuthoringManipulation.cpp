@@ -3,9 +3,13 @@
 
 #include "Blueprint/WidgetTree.h"
 #include "Components/CanvasPanelSlot.h"
+#include "Components/HorizontalBoxSlot.h"
+#include "Components/OverlaySlot.h"
 #include "Components/PanelSlot.h"
 #include "Components/PanelWidget.h"
+#include "Components/VerticalBoxSlot.h"
 #include "Components/Widget.h"
+#include "Layout/Margin.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Foundation/BridgeHelpers/McpAutomationBridgeHelpers.h"
 #include "McpAutomationBridgeSubsystem.h"
@@ -219,6 +223,167 @@ bool HandleWidgetAuthoringManipulation(
         }
 
         Subsystem.SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Retrieved widget slot info"), ResultJson);
+        return true;
+    }
+
+    // set_slot -- generic slot-property setter for widgets living in box /
+    // overlay / grid panels. The granular set_position / set_anchor / set_size
+    // actions only cover Canvas panels; without set_slot, box/overlay/grid
+    // slots have no scriptable path to their alignment, size rule or padding.
+    // Ported from feat/custom-tooling@d9fea10 WidgetAuthoringHandlers.cpp:3184.
+    // Adapted for the split file layout: uses SlotName-string lookup like the
+    // rest of Manipulation.cpp instead of the old FindWidgetFromPayload helper.
+    if (SubAction.Equals(TEXT("set_slot"), ESearchCase::IgnoreCase))
+    {
+        const FString WidgetPath = GetJsonStringField(Payload, TEXT("widgetPath"));
+        FString SlotName = GetJsonStringField(Payload, TEXT("slotName"));
+        if (SlotName.IsEmpty())
+        {
+            // Accept widgetName as an alias for convenience.
+            SlotName = GetJsonStringField(Payload, TEXT("widgetName"));
+        }
+        if (WidgetPath.IsEmpty() || SlotName.IsEmpty())
+        {
+            Subsystem.SendAutomationError(RequestingSocket, RequestId,
+                TEXT("Missing required parameters: widgetPath, slotName"),
+                TEXT("MISSING_PARAMETER"));
+            return true;
+        }
+
+        UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(WidgetPath);
+        if (!WidgetBP || !WidgetBP->WidgetTree)
+        {
+            Subsystem.SendAutomationError(RequestingSocket, RequestId,
+                TEXT("Widget blueprint not found"), TEXT("NOT_FOUND"));
+            return true;
+        }
+        UWidget* Widget = WidgetBP->WidgetTree->FindWidget(FName(*SlotName));
+        if (!Widget)
+        {
+            Subsystem.SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("Widget '%s' not found"), *SlotName),
+                TEXT("WIDGET_NOT_FOUND"));
+            return true;
+        }
+
+        auto ParseHAlign = [](const FString& Str) -> TOptional<EHorizontalAlignment>
+        {
+            if (Str.Equals(TEXT("Fill"),   ESearchCase::IgnoreCase)) return EHorizontalAlignment::HAlign_Fill;
+            if (Str.Equals(TEXT("Left"),   ESearchCase::IgnoreCase)) return EHorizontalAlignment::HAlign_Left;
+            if (Str.Equals(TEXT("Center"), ESearchCase::IgnoreCase)) return EHorizontalAlignment::HAlign_Center;
+            if (Str.Equals(TEXT("Right"),  ESearchCase::IgnoreCase)) return EHorizontalAlignment::HAlign_Right;
+            return {};
+        };
+        auto ParseVAlign = [](const FString& Str) -> TOptional<EVerticalAlignment>
+        {
+            if (Str.Equals(TEXT("Fill"),   ESearchCase::IgnoreCase)) return EVerticalAlignment::VAlign_Fill;
+            if (Str.Equals(TEXT("Top"),    ESearchCase::IgnoreCase)) return EVerticalAlignment::VAlign_Top;
+            if (Str.Equals(TEXT("Center"), ESearchCase::IgnoreCase)) return EVerticalAlignment::VAlign_Center;
+            if (Str.Equals(TEXT("Bottom"), ESearchCase::IgnoreCase)) return EVerticalAlignment::VAlign_Bottom;
+            return {};
+        };
+
+        const FString SizeRuleStr = GetJsonStringField(Payload, TEXT("sizeRule"));
+        const double  FillWeight  = GetJsonNumberField(Payload, TEXT("fillWeight"), -1.0);
+        const FString HAlignStr   = GetJsonStringField(Payload, TEXT("horizontalAlignment"));
+        const FString VAlignStr   = GetJsonStringField(Payload, TEXT("verticalAlignment"));
+
+        FMargin PaddingMargin(0);
+        bool bHasPadding = false;
+        if (Payload->HasField(TEXT("padding")))
+        {
+            const double Uniform = GetJsonNumberField(Payload, TEXT("padding"), 0.0);
+            PaddingMargin = FMargin(Uniform);
+            bHasPadding = true;
+        }
+        if (Payload->HasField(TEXT("left"))  || Payload->HasField(TEXT("top")) ||
+            Payload->HasField(TEXT("right")) || Payload->HasField(TEXT("bottom")))
+        {
+            PaddingMargin.Left   = GetJsonNumberField(Payload, TEXT("left"),   PaddingMargin.Left);
+            PaddingMargin.Top    = GetJsonNumberField(Payload, TEXT("top"),    PaddingMargin.Top);
+            PaddingMargin.Right  = GetJsonNumberField(Payload, TEXT("right"),  PaddingMargin.Right);
+            PaddingMargin.Bottom = GetJsonNumberField(Payload, TEXT("bottom"), PaddingMargin.Bottom);
+            bHasPadding = true;
+        }
+
+        FString SlotType = TEXT("unknown");
+        bool bApplied = false;
+
+        auto ApplyBoxSize = [&](auto* BoxSlot)
+        {
+            if (!SizeRuleStr.IsEmpty())
+            {
+                FSlateChildSize ChildSize;
+                if (SizeRuleStr.Equals(TEXT("Fill"), ESearchCase::IgnoreCase))
+                {
+                    ChildSize.SizeRule = ESlateSizeRule::Fill;
+                    ChildSize.Value    = (FillWeight > 0.0) ? static_cast<float>(FillWeight) : 1.0f;
+                }
+                else
+                {
+                    ChildSize.SizeRule = ESlateSizeRule::Automatic;
+                    ChildSize.Value    = 1.0f;
+                }
+                BoxSlot->SetSize(ChildSize);
+                bApplied = true;
+            }
+            else if (FillWeight > 0.0)
+            {
+                FSlateChildSize ChildSize;
+                ChildSize.SizeRule = ESlateSizeRule::Fill;
+                ChildSize.Value    = static_cast<float>(FillWeight);
+                BoxSlot->SetSize(ChildSize);
+                bApplied = true;
+            }
+        };
+
+        if (UHorizontalBoxSlot* HBoxSlot = Cast<UHorizontalBoxSlot>(Widget->Slot))
+        {
+            SlotType = TEXT("HorizontalBoxSlot");
+            ApplyBoxSize(HBoxSlot);
+            if (auto H = ParseHAlign(HAlignStr)) { HBoxSlot->SetHorizontalAlignment(H.GetValue()); bApplied = true; }
+            if (auto V = ParseVAlign(VAlignStr)) { HBoxSlot->SetVerticalAlignment(V.GetValue());   bApplied = true; }
+            if (bHasPadding) { HBoxSlot->SetPadding(PaddingMargin); bApplied = true; }
+        }
+        else if (UVerticalBoxSlot* VBoxSlot = Cast<UVerticalBoxSlot>(Widget->Slot))
+        {
+            SlotType = TEXT("VerticalBoxSlot");
+            ApplyBoxSize(VBoxSlot);
+            if (auto H = ParseHAlign(HAlignStr)) { VBoxSlot->SetHorizontalAlignment(H.GetValue()); bApplied = true; }
+            if (auto V = ParseVAlign(VAlignStr)) { VBoxSlot->SetVerticalAlignment(V.GetValue());   bApplied = true; }
+            if (bHasPadding) { VBoxSlot->SetPadding(PaddingMargin); bApplied = true; }
+        }
+        else if (UOverlaySlot* OvSlot = Cast<UOverlaySlot>(Widget->Slot))
+        {
+            SlotType = TEXT("OverlaySlot");
+            if (auto H = ParseHAlign(HAlignStr)) { OvSlot->SetHorizontalAlignment(H.GetValue()); bApplied = true; }
+            if (auto V = ParseVAlign(VAlignStr)) { OvSlot->SetVerticalAlignment(V.GetValue());   bApplied = true; }
+            if (bHasPadding) { OvSlot->SetPadding(PaddingMargin); bApplied = true; }
+        }
+        else if (Cast<UCanvasPanelSlot>(Widget->Slot))
+        {
+            Subsystem.SendAutomationError(RequestingSocket, RequestId,
+                TEXT("Widget is in a CanvasPanel -- use set_anchor, set_position, set_size instead"),
+                TEXT("WRONG_SLOT_TYPE"));
+            return true;
+        }
+
+        if (!bApplied)
+        {
+            Subsystem.SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("No properties applied. Slot type: %s"), *SlotType),
+                TEXT("NO_CHANGES"));
+            return true;
+        }
+
+        FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WidgetBP);
+
+        ResultJson->SetBoolField(TEXT("success"),   true);
+        ResultJson->SetStringField(TEXT("slotType"), SlotType);
+        ResultJson->SetStringField(TEXT("message"),
+            FString::Printf(TEXT("Slot properties set (%s)"), *SlotType));
+
+        Subsystem.SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Slot set"), ResultJson);
         return true;
     }
 

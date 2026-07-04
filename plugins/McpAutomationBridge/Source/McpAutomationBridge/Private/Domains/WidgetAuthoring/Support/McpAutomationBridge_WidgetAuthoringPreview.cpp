@@ -10,6 +10,23 @@
 
 #include "Blueprint/UserWidget.h"
 #include "Blueprint/WidgetTree.h"
+#include "Components/Border.h"
+#include "Components/CanvasPanel.h"
+#include "Components/CanvasPanelSlot.h"
+#include "Components/GridPanel.h"
+#include "Components/HorizontalBox.h"
+#include "Components/Image.h"
+#include "Components/Overlay.h"
+#include "Components/ProgressBar.h"
+#include "Components/RichTextBlock.h"
+#include "Components/ScaleBox.h"
+#include "Components/ScrollBox.h"
+#include "Components/SizeBox.h"
+#include "Components/Spacer.h"
+#include "Components/TextBlock.h"
+#include "Components/UniformGridPanel.h"
+#include "Components/VerticalBox.h"
+#include "Components/WrapBox.h"
 #include "Editor.h"
 #include "Engine/Engine.h"
 #include "Engine/TextureRenderTarget2D.h"
@@ -228,6 +245,119 @@ bool HandleWidgetAuthoringPreview(
 
         Subsystem.SendAutomationResponse(RequestingSocket, RequestId, true,
             TEXT("Widget screenshot captured"), ResultJson);
+        return true;
+    }
+
+    // validate_widget_blueprint -- widget-tree linter. Walks the tree via
+    // ForEachWidget (same order as get_widget_info so indices line up) and
+    // returns warnings for common UMG authoring foot-guns: non-interactive
+    // widgets with Visible visibility (blocks input), nested Canvas Panels,
+    // TextBlocks without auto-wrap, spanning anchors with non-zero offsets,
+    // and generic default names. Ported from feat/custom-tooling@d9fea10
+    // WidgetAuthoringHandlers.cpp:7663.
+    if (SubAction.Equals(TEXT("validate_widget_blueprint"), ESearchCase::IgnoreCase))
+    {
+        const FString WidgetPath = GetJsonStringField(Payload, TEXT("widgetPath"));
+        if (WidgetPath.IsEmpty())
+        {
+            Subsystem.SendAutomationError(RequestingSocket, RequestId,
+                TEXT("Missing required parameter: widgetPath"), TEXT("MISSING_PARAMETER"));
+            return true;
+        }
+        UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(WidgetPath);
+        if (!WidgetBP || !WidgetBP->WidgetTree)
+        {
+            Subsystem.SendAutomationError(RequestingSocket, RequestId,
+                TEXT("Widget blueprint not found"), TEXT("NOT_FOUND"));
+            return true;
+        }
+
+        TArray<TSharedPtr<FJsonValue>> Warnings;
+        int32 WidgetCount = 0;
+
+        WidgetBP->WidgetTree->ForEachWidget([&](UWidget* Widget)
+        {
+            if (!Widget) return;
+            const int32 WidgetIndex = WidgetCount++;
+            const FString WName = Widget->GetName();
+            const FString CName = Widget->GetClass()->GetName();
+
+            auto Warn = [&](const FString& Msg) {
+                Warnings.Add(MakeShared<FJsonValueString>(
+                    FString::Printf(TEXT("[#%d %s] '%s' %s"),
+                        WidgetIndex, *CName, *WName, *Msg)));
+            };
+
+            const bool bNonInteractive = Widget->IsA<UTextBlock>() || Widget->IsA<URichTextBlock>() ||
+                                         Widget->IsA<UImage>()     || Widget->IsA<UProgressBar>()   ||
+                                         Widget->IsA<USpacer>();
+            const bool bLayoutPanel    = Widget->IsA<UCanvasPanel>()      || Widget->IsA<UHorizontalBox>() ||
+                                         Widget->IsA<UVerticalBox>()      || Widget->IsA<UOverlay>()       ||
+                                         Widget->IsA<UBorder>()           || Widget->IsA<UGridPanel>()     ||
+                                         Widget->IsA<UUniformGridPanel>() || Widget->IsA<UWrapBox>()       ||
+                                         Widget->IsA<UScrollBox>()        || Widget->IsA<USizeBox>()       ||
+                                         Widget->IsA<UScaleBox>();
+
+            if ((bNonInteractive || bLayoutPanel) &&
+                Widget->GetVisibility() == ESlateVisibility::Visible)
+            {
+                Warn(TEXT("uses Visible visibility. Use SelfHitTestInvisible for non-interactive widgets to avoid blocking input."));
+            }
+
+            if (Widget->IsA<UCanvasPanel>() && Widget != WidgetBP->WidgetTree->RootWidget)
+            {
+                if (UWidget* Parent = Widget->GetParent())
+                {
+                    if (Parent->IsA<UCanvasPanel>())
+                    {
+                        Warn(TEXT("is a Canvas Panel nested inside another Canvas Panel. Use Overlay, HBox, or VBox for inner layout."));
+                    }
+                }
+            }
+
+            if (UTextBlock* TB = Cast<UTextBlock>(Widget))
+            {
+                if (!TB->GetAutoWrapText())
+                {
+                    Warn(TEXT("has auto-wrap disabled. Enable for responsive text that adapts to container size."));
+                }
+            }
+
+            if (UCanvasPanelSlot* CanvasSlot = Cast<UCanvasPanelSlot>(Widget->Slot))
+            {
+                const FAnchors A = CanvasSlot->GetAnchors();
+                const bool bSpanning = !FMath::IsNearlyEqual(A.Minimum.X, A.Maximum.X)
+                                    || !FMath::IsNearlyEqual(A.Minimum.Y, A.Maximum.Y);
+                if (bSpanning)
+                {
+                    const FVector2D Pos  = CanvasSlot->GetPosition();
+                    const FVector2D Size = CanvasSlot->GetSize();
+                    if (!Pos.IsNearlyZero() || !Size.IsNearlyZero())
+                    {
+                        Warn(FString::Printf(TEXT("has spanning anchors but non-zero offsets (pos=%.1f,%.1f size=%.1f,%.1f). Set to 0,0 for full stretch."),
+                            Pos.X, Pos.Y, Size.X, Size.Y));
+                    }
+                }
+            }
+
+            if (WName.Equals(TEXT("TextBlock"))   || WName.Equals(TEXT("Image"))  ||
+                WName.Equals(TEXT("Button"))      || WName.Equals(TEXT("CanvasPanel")) ||
+                WName.Equals(TEXT("Border")))
+            {
+                Warn(TEXT("uses a generic default name. Use descriptive names (e.g., 'TitleText', 'BgImage', 'StartButton')."));
+            }
+        });
+
+        const FString Summary = FString::Printf(
+            TEXT("Validated %d widgets, found %d warnings"), WidgetCount, Warnings.Num());
+
+        ResultJson->SetBoolField(TEXT("success"),      true);
+        ResultJson->SetNumberField(TEXT("widgetCount"),  WidgetCount);
+        ResultJson->SetNumberField(TEXT("warningCount"), Warnings.Num());
+        ResultJson->SetArrayField(TEXT("warnings"),      Warnings);
+        ResultJson->SetStringField(TEXT("message"),      Summary);
+
+        Subsystem.SendAutomationResponse(RequestingSocket, RequestId, true, Summary, ResultJson);
         return true;
     }
 

@@ -35,7 +35,8 @@ const WIDGET_PATH_ONLY_ACTIONS = [
   'add_damage_indicator',
   'get_widget_info',
   'preview_widget',
-  'screenshot_widget'
+  'screenshot_widget',
+  'validate_widget_blueprint'
 ] as const;
 
 const WIDGET_SLOT_ACTIONS = [
@@ -44,6 +45,7 @@ const WIDGET_SLOT_ACTIONS = [
   'set_position',
   'set_size',
   'set_padding',
+  'set_slot',
   'set_z_order',
   'set_render_transform',
   'set_visibility',
