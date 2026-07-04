@@ -160,7 +160,7 @@ export const WIDGET_AUTHORING_ACTIONS = [
   'create_loading_screen', 'create_hud_widget', 'add_health_bar', 'add_ammo_counter', 'add_minimap',
   'add_crosshair', 'add_compass', 'add_interaction_prompt', 'add_objective_tracker',
   'add_damage_indicator', 'create_inventory_ui', 'create_dialog_widget', 'create_radial_menu',
-  'get_widget_info', 'preview_widget'
+  'get_widget_info', 'preview_widget', 'screenshot_widget'
 ] as const;
 
 export const SESSION_ACTIONS = [

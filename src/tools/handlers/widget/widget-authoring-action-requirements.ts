@@ -34,7 +34,8 @@ const WIDGET_PATH_ONLY_ACTIONS = [
   'add_objective_tracker',
   'add_damage_indicator',
   'get_widget_info',
-  'preview_widget'
+  'preview_widget',
+  'screenshot_widget'
 ] as const;
 
 const WIDGET_SLOT_ACTIONS = [

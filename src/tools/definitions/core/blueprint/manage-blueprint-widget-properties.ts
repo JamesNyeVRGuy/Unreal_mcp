@@ -186,5 +186,7 @@ sourcePin: commonSchemas.sourcePin,
 targetNode: commonSchemas.stringProp,
 targetPin: commonSchemas.targetPin,
 title: commonSchemas.stringProp,
-width: commonSchemas.numberProp
+width: commonSchemas.numberProp,
+filename: { type: 'string', description: 'Output PNG filename for screenshot_widget. Defaults to <widgetName>_<timestamp>.png. Saved under <Project>/Saved/Screenshots/Widgets/.' },
+returnBase64: { type: 'boolean', description: 'When true, screenshot_widget includes the PNG as base64 in the response (in addition to writing the file). Useful for inline preview.' }
 };
