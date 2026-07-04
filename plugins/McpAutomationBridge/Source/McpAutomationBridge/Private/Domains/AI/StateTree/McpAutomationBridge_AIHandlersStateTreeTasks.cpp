@@ -3,14 +3,274 @@
 #if WITH_EDITOR
 #include "Domains/AI/StateTree/McpAutomationBridge_AIStateTreeFeature.h"
 
-// Explicit includes for the types Gate 2 references. The shared feature
-// header pulls these in too under nested __has_include guards, but a direct
-// include here removes any inclusion-order fragility for translation units
-// that reach FStateTreeTaskBase / FStateTreeEditorNode.
+// Explicit includes for the types Gate 2 + Gate 3 reference. The shared
+// feature header pulls these in too under nested __has_include guards, but
+// a direct include here removes any inclusion-order fragility for this
+// translation unit.
 #if MCP_HAS_STATE_TREE && MCP_STATE_TREE_HEADERS_AVAILABLE
 #include "StateTreeTaskBase.h"
 #include "StateTreeEditorNode.h"
+#include "GameplayTagContainer.h"
+#include "UObject/EnumProperty.h"
+#include "UObject/UnrealType.h"
+#include "Dom/JsonValue.h"
 #endif
+
+namespace McpAIHandlers
+{
+#if MCP_HAS_STATE_TREE && MCP_STATE_TREE_HEADERS_AVAILABLE
+// Gate 3: map one JSON value onto a single FProperty on an instance-data
+// struct. Covers the property types Canopy's tasks actually use:
+//   numeric (int/float/double/byte)
+//   bool
+//   string / name / text
+//   enum (accepts string enum-value name OR numeric)
+//   struct: FGameplayTag, FVector, FVector2D, FSoftObjectPath
+//   object (soft or hard) refs by path
+// Anything else logs a warning and is skipped (leaves default). Return
+// value is whether the field was applied; failed / skipped fields are
+// noted via OutErrors.
+static bool SetPropertyFromJson(
+    FProperty* Prop, void* Container,
+    const TSharedPtr<FJsonValue>& Value,
+    const FString& KeyForDiag,
+    TArray<FString>& OutErrors)
+{
+    if (!Prop || !Value.IsValid())
+    {
+        return false;
+    }
+
+    if (const FIntProperty* IntProp = CastField<FIntProperty>(Prop))
+    {
+        double N = 0.0;
+        if (!Value->TryGetNumber(N))
+        {
+            OutErrors.Add(FString::Printf(TEXT("%s: expected number, got %s"), *KeyForDiag, *FString::FromInt(int32(Value->Type))));
+            return false;
+        }
+        IntProp->SetPropertyValue(Container, static_cast<int32>(N));
+        return true;
+    }
+    if (const FInt64Property* I64Prop = CastField<FInt64Property>(Prop))
+    {
+        double N = 0.0;
+        if (!Value->TryGetNumber(N)) return false;
+        I64Prop->SetPropertyValue(Container, static_cast<int64>(N));
+        return true;
+    }
+    if (const FFloatProperty* FProp = CastField<FFloatProperty>(Prop))
+    {
+        double N = 0.0;
+        if (!Value->TryGetNumber(N)) return false;
+        FProp->SetPropertyValue(Container, static_cast<float>(N));
+        return true;
+    }
+    if (const FDoubleProperty* DProp = CastField<FDoubleProperty>(Prop))
+    {
+        double N = 0.0;
+        if (!Value->TryGetNumber(N)) return false;
+        DProp->SetPropertyValue(Container, N);
+        return true;
+    }
+    if (const FBoolProperty* BProp = CastField<FBoolProperty>(Prop))
+    {
+        bool B = false;
+        if (!Value->TryGetBool(B)) return false;
+        BProp->SetPropertyValue(Container, B);
+        return true;
+    }
+    if (const FStrProperty* SProp = CastField<FStrProperty>(Prop))
+    {
+        FString S;
+        if (!Value->TryGetString(S)) return false;
+        SProp->SetPropertyValue(Container, S);
+        return true;
+    }
+    if (const FNameProperty* NProp = CastField<FNameProperty>(Prop))
+    {
+        FString S;
+        if (!Value->TryGetString(S)) return false;
+        NProp->SetPropertyValue(Container, FName(*S));
+        return true;
+    }
+    if (const FTextProperty* TProp = CastField<FTextProperty>(Prop))
+    {
+        FString S;
+        if (!Value->TryGetString(S)) return false;
+        TProp->SetPropertyValue(Container, FText::FromString(S));
+        return true;
+    }
+
+    // Enum: accept either enum-value NAME string ("PickUpFood") or numeric.
+    if (const FEnumProperty* EnumProp = CastField<FEnumProperty>(Prop))
+    {
+        FString S;
+        if (Value->TryGetString(S))
+        {
+            const UEnum* Enum = EnumProp->GetEnum();
+            const int64 EnumVal = Enum ? Enum->GetValueByNameString(S) : INDEX_NONE;
+            if (EnumVal == INDEX_NONE)
+            {
+                OutErrors.Add(FString::Printf(TEXT("%s: enum value '%s' not found in %s"),
+                    *KeyForDiag, *S, Enum ? *Enum->GetName() : TEXT("<null>")));
+                return false;
+            }
+            EnumProp->GetUnderlyingProperty()->SetIntPropertyValue(Container, EnumVal);
+            return true;
+        }
+        double N = 0.0;
+        if (Value->TryGetNumber(N))
+        {
+            EnumProp->GetUnderlyingProperty()->SetIntPropertyValue(Container, static_cast<int64>(N));
+            return true;
+        }
+        return false;
+    }
+    // Byte-enum: same treatment but on a plain FByteProperty with an Enum.
+    if (const FByteProperty* ByteProp = CastField<FByteProperty>(Prop))
+    {
+        if (ByteProp->Enum)
+        {
+            FString S;
+            if (Value->TryGetString(S))
+            {
+                const int64 EnumVal = ByteProp->Enum->GetValueByNameString(S);
+                if (EnumVal == INDEX_NONE)
+                {
+                    OutErrors.Add(FString::Printf(TEXT("%s: enum value '%s' not found in %s"),
+                        *KeyForDiag, *S, *ByteProp->Enum->GetName()));
+                    return false;
+                }
+                ByteProp->SetPropertyValue(Container, static_cast<uint8>(EnumVal));
+                return true;
+            }
+        }
+        double N = 0.0;
+        if (!Value->TryGetNumber(N)) return false;
+        ByteProp->SetPropertyValue(Container, static_cast<uint8>(N));
+        return true;
+    }
+
+    // Object refs (both TObjectPtr<X> and TSoftObjectPtr<X>) by path string.
+    if (const FObjectProperty* ObjProp = CastField<FObjectProperty>(Prop))
+    {
+        FString Path;
+        if (!Value->TryGetString(Path)) return false;
+        UObject* Loaded = StaticLoadObject(ObjProp->PropertyClass, nullptr, *Path);
+        ObjProp->SetObjectPropertyValue(Container, Loaded);
+        return Loaded != nullptr;
+    }
+    if (const FSoftObjectProperty* SoftProp = CastField<FSoftObjectProperty>(Prop))
+    {
+        FString Path;
+        if (!Value->TryGetString(Path)) return false;
+        const FSoftObjectPath SoftPath(Path);
+        FSoftObjectPtr Soft(SoftPath);
+        SoftProp->SetPropertyValue(Container, Soft);
+        return true;
+    }
+
+    // Struct properties -- handle the common wire-format-friendly ones.
+    if (const FStructProperty* StructProp = CastField<FStructProperty>(Prop))
+    {
+        UScriptStruct* SS = StructProp->Struct;
+        if (!SS) return false;
+
+        // FGameplayTag: accept a tag name string like "Canopy.Agent.HasTarget".
+        if (SS == FGameplayTag::StaticStruct())
+        {
+            FString S;
+            if (!Value->TryGetString(S)) return false;
+            const FGameplayTag Tag = FGameplayTag::RequestGameplayTag(FName(*S),
+                /*ErrorIfNotFound*/ false);
+            *reinterpret_cast<FGameplayTag*>(Container) = Tag;
+            return true;
+        }
+
+        // FVector: accept {x, y, z} object or [x, y, z] array.
+        if (SS == TBaseStructure<FVector>::Get())
+        {
+            FVector V(0);
+            const TSharedPtr<FJsonObject>* Obj = nullptr;
+            const TArray<TSharedPtr<FJsonValue>>* Arr = nullptr;
+            if (Value->TryGetObject(Obj) && Obj && (*Obj).IsValid())
+            {
+                double X = 0, Y = 0, Z = 0;
+                (*Obj)->TryGetNumberField(TEXT("x"), X);
+                (*Obj)->TryGetNumberField(TEXT("y"), Y);
+                (*Obj)->TryGetNumberField(TEXT("z"), Z);
+                V = FVector(X, Y, Z);
+            }
+            else if (Value->TryGetArray(Arr) && Arr && Arr->Num() >= 3)
+            {
+                double X = 0, Y = 0, Z = 0;
+                (*Arr)[0]->TryGetNumber(X);
+                (*Arr)[1]->TryGetNumber(Y);
+                (*Arr)[2]->TryGetNumber(Z);
+                V = FVector(X, Y, Z);
+            }
+            else
+            {
+                return false;
+            }
+            *reinterpret_cast<FVector*>(Container) = V;
+            return true;
+        }
+
+        // FSoftObjectPath: accept path string.
+        if (SS == TBaseStructure<FSoftObjectPath>::Get())
+        {
+            FString Path;
+            if (!Value->TryGetString(Path)) return false;
+            *reinterpret_cast<FSoftObjectPath*>(Container) = FSoftObjectPath(Path);
+            return true;
+        }
+
+        OutErrors.Add(FString::Printf(TEXT("%s: struct type %s not supported in Gate 3 (skipped)"),
+            *KeyForDiag, *SS->GetName()));
+        return false;
+    }
+
+    OutErrors.Add(FString::Printf(TEXT("%s: property type %s not supported (skipped)"),
+        *KeyForDiag, *Prop->GetClass()->GetName()));
+    return false;
+}
+
+// Walk a JSON object, applying each key -> FProperty on the given
+// instance-data FInstancedStruct.
+static void ApplyJsonPropertiesToInstance(
+    const TSharedPtr<FJsonObject>& Properties,
+    FInstancedStruct& Instance,
+    TArray<FString>& OutErrors,
+    int32& OutAppliedCount)
+{
+    OutAppliedCount = 0;
+    if (!Properties.IsValid()) return;
+    const UScriptStruct* Struct = Instance.GetScriptStruct();
+    if (!Struct) { OutErrors.Add(TEXT("instance has no struct type")); return; }
+    uint8* Memory = Instance.GetMutableMemory();
+    if (!Memory)  { OutErrors.Add(TEXT("instance has no memory"));     return; }
+
+    for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Properties->Values)
+    {
+        const FString& Key = Pair.Key;
+        FProperty* Prop = Struct->FindPropertyByName(FName(*Key));
+        if (!Prop)
+        {
+            OutErrors.Add(FString::Printf(TEXT("Property '%s' not found on %s"),
+                *Key, *Struct->GetName()));
+            continue;
+        }
+        void* Container = Prop->ContainerPtrToValuePtr<void>(Memory);
+        if (SetPropertyFromJson(Prop, Container, Pair.Value, Key, OutErrors))
+        {
+            ++OutAppliedCount;
+        }
+    }
+}
+#endif // MCP_HAS_STATE_TREE && MCP_STATE_TREE_HEADERS_AVAILABLE
+} // namespace McpAIHandlers
 
 namespace McpAIHandlers
 {
@@ -129,6 +389,33 @@ bool HandleConfigureStateTreeTask(UMcpAutomationBridgeSubsystem* Self, const FSt
                 AddedNodeClassPath = TaskStruct->GetPathName();
                 AddedNodeId        = TaskItem.ID;
                 bTaskAdded         = true;
+
+                // Gate 3: apply Payload["properties"] JSON object onto the
+                // task's instance-data struct via FProperty reflection.
+                // Missing / unsupported fields land in PropertyWarnings for
+                // the caller to inspect; they do NOT fail the request (the
+                // task is still added, just with defaults for those fields).
+                const TSharedPtr<FJsonObject>* PropertiesObj = nullptr;
+                if (Payload->TryGetObjectField(TEXT("properties"), PropertiesObj)
+                    && PropertiesObj && (*PropertiesObj).IsValid())
+                {
+                    TArray<FString> Warnings;
+                    int32 Applied = 0;
+                    ApplyJsonPropertiesToInstance(*PropertiesObj, TaskItem.Instance,
+                        Warnings, Applied);
+
+                    Result->SetNumberField(TEXT("propertiesApplied"), Applied);
+                    if (Warnings.Num() > 0)
+                    {
+                        TArray<TSharedPtr<FJsonValue>> WarnJson;
+                        WarnJson.Reserve(Warnings.Num());
+                        for (const FString& W : Warnings)
+                        {
+                            WarnJson.Add(MakeShared<FJsonValueString>(W));
+                        }
+                        Result->SetArrayField(TEXT("propertyWarnings"), WarnJson);
+                    }
+                }
             }
         }
 
