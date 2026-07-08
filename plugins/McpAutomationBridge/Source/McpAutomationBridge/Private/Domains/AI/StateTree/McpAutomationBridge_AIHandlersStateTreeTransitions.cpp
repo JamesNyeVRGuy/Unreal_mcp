@@ -61,10 +61,29 @@ bool HandleAddStateTreeTransition(UMcpAutomationBridgeSubsystem* Self, const FSt
             return nullptr;
         };
 
+        // Terminal targets: "Succeeded" / "Failed" / "NextState" complete the
+        // TREE (EStateTreeTransitionType) rather than jumping to a named state.
+        // Without these, action-style trees cannot get the terminal completion
+        // transition their orchestrators rely on (TACB-780).
+        EStateTreeTransitionType TransitionType = EStateTreeTransitionType::GotoState;
+        if (ToState.Equals(TEXT("Succeeded"), ESearchCase::IgnoreCase))
+        {
+            TransitionType = EStateTreeTransitionType::Succeeded;
+        }
+        else if (ToState.Equals(TEXT("Failed"), ESearchCase::IgnoreCase))
+        {
+            TransitionType = EStateTreeTransitionType::Failed;
+        }
+        else if (ToState.Equals(TEXT("NextState"), ESearchCase::IgnoreCase))
+        {
+            TransitionType = EStateTreeTransitionType::NextState;
+        }
+        const bool bTerminalTarget = TransitionType != EStateTreeTransitionType::GotoState;
+
         for (UStateTreeState* SubTree : EditorData->SubTrees)
         {
             if (!SourceState) SourceState = FindState(SubTree, FromState);
-            if (!TargetState) TargetState = FindState(SubTree, ToState);
+            if (!bTerminalTarget && !TargetState) TargetState = FindState(SubTree, ToState);
         }
 
         if (!SourceState)
@@ -74,7 +93,7 @@ bool HandleAddStateTreeTransition(UMcpAutomationBridgeSubsystem* Self, const FSt
             return true;
         }
 
-        if (!TargetState)
+        if (!bTerminalTarget && !TargetState)
         {
             Self->SendAutomationError(RequestingSocket, RequestId,
                 FString::Printf(TEXT("Target state '%s' not found"), *ToState), TEXT("NOT_FOUND"));
@@ -96,8 +115,8 @@ bool HandleAddStateTreeTransition(UMcpAutomationBridgeSubsystem* Self, const FSt
             Trigger = EStateTreeTransitionTrigger::OnEvent;
         }
 
-        // Add transition
-        FStateTreeTransition& Transition = SourceState->AddTransition(Trigger, EStateTreeTransitionType::GotoState, TargetState);
+        // Add transition (terminal targets pass no state -- the type carries it)
+        FStateTreeTransition& Transition = SourceState->AddTransition(Trigger, TransitionType, bTerminalTarget ? nullptr : TargetState);
 
         // Save
         McpSafeAssetSave(StateTree);
