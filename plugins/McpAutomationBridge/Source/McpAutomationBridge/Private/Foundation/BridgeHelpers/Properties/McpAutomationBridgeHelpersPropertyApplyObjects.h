@@ -137,12 +137,35 @@ static inline bool ApplyJsonObjectValueToProperty(void *TargetContainer, FProper
 					}
 				}
 
-				// NOTE: ImportText-based struct parsing is intentionally omitted
-				// because engine textual import signatures differ across engine
-				// revisions and can produce fragile compilation failures. If a
-				// non-JSON textual import format is required in the future we
-				// can implement a safe parser here or add an explicit engine
-				// compatibility shim guarded by a feature macro.
+				// FGuid arrives as bare hex ("6C2B...") or dashed text -- not
+				// valid JSON, so the converter above never matches. Parse
+				// natively; without this every FGuid function parameter
+				// (graph node ids etc.) silently zeroed.
+				if (TypeName.Equals(TEXT("Guid"), ESearchCase::IgnoreCase)) {
+					FGuid ParsedGuid;
+					if (FGuid::Parse(Txt, ParsedGuid)) {
+						SP->Struct->CopyScriptStruct(
+							SP->ContainerPtrToValuePtr<void>(TargetContainer), &ParsedGuid);
+						return true;
+					}
+					OutError = FString::Printf(
+						TEXT("Could not parse '%s' as FGuid"), *Txt);
+					return false;
+				}
+
+				// Generic UE-export-text fallback for everything else
+				// (FGameplayTag, engine structs exported via ExportText, ...).
+				// The UScriptStruct::ImportText signature is stable across
+				// UE 5.x, which is all this fork targets.
+				{
+					FStringOutputDevice ImportErrors;
+					SP->Struct->ImportText(*Txt,
+						SP->ContainerPtrToValuePtr<void>(TargetContainer),
+						nullptr, PPF_None, &ImportErrors, SP->Struct->GetName());
+					if (ImportErrors.IsEmpty()) {
+						return true;
+					}
+				}
 			}
 		}
 

@@ -290,7 +290,17 @@ bool UMcpAutomationBridgeSubsystem::HandleControlActorCallFunction(
         if (!ParamVal.IsValid()) continue;
 
         FString ApplyErr;
-        ApplyJsonValueToProperty(ParmsBuffer, Param, ParamVal, ApplyErr);
+        if (!ApplyJsonValueToProperty(ParmsBuffer, Param, ParamVal, ApplyErr)) {
+          // A silently zeroed parameter is a debugging tarpit (a zero FGuid
+          // "runs fine" and just finds nothing). Fail the call loudly.
+          FMemory::Free(ParmsBuffer);
+          SendAutomationError(Socket, RequestId,
+              FString::Printf(TEXT("Parameter '%s' (%s) failed conversion: %s"),
+                  *Param->GetName(), *Param->GetClass()->GetName(),
+                  ApplyErr.IsEmpty() ? TEXT("unsupported type") : *ApplyErr),
+              TEXT("PARAM_CONVERSION_FAILED"));
+          return true;
+        }
       }
     }
   }
