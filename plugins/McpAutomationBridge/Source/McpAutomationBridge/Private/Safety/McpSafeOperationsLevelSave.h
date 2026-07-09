@@ -7,6 +7,7 @@
 #include "Engine/World.h"
 #include "FileHelpers.h"
 #include "HAL/FileManager.h"
+#include "HAL/PlatformFileManager.h"
 #include "HAL/PlatformProcess.h"
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
@@ -151,6 +152,21 @@ inline bool McpSafeLevelSave(ULevel* Level, const FString& FullPath, int32 MaxRe
         UE_LOG(LogMcpSafeOperations, Error,
             TEXT("McpSafeLevelSave: Failed to convert package path to filename: %s"), *PackagePath);
         return false;
+    }
+
+    // TACB-821: clear the read-only bit before saving. Git commits re-mark
+    // committed .umap files read-only, and the editor save path hangs handling
+    // a read-only target (FlushAsyncLoading deadlock). Same root cause + fix as
+    // McpSafeAssetSave for content packages.
+    {
+        const FString AbsSaveFilename = FPaths::ConvertRelativePathToFull(SaveFilename);
+        IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
+        if (PlatformFile.FileExists(*AbsSaveFilename) && PlatformFile.IsReadOnly(*AbsSaveFilename))
+        {
+            PlatformFile.SetReadOnly(*AbsSaveFilename, false);
+            UE_LOG(LogMcpSafeOperations, Log,
+                TEXT("McpSafeLevelSave: cleared read-only bit on %s (TACB-821)"), *AbsSaveFilename);
+        }
     }
 
     bool bSaveSucceeded = FEditorFileUtils::SaveLevel(Level, *SaveFilename);
