@@ -23,6 +23,26 @@ bool UMcpAutomationBridgeSubsystem::HandleManageWidgetAuthoringAction(
         SubAction = GetJsonStringField(Payload, TEXT("action"));
     }
 
+    // The add_* component handlers read the NEW widget's name from "slotName"
+    // (defaulting to the widget type, e.g. "TextBlock"). The tool schema also
+    // advertises "componentName"/"name", so accept those as aliases when
+    // "slotName" is absent -- otherwise callers using the documented params get
+    // a default-named widget that a C++ BindWidget can never resolve. Creation
+    // subactions read "name" directly for the Blueprint name and ignore
+    // "slotName", so this aliasing is safe for them.
+    if (GetJsonStringField(Payload, TEXT("slotName")).IsEmpty())
+    {
+        FString NameAlias = GetJsonStringField(Payload, TEXT("componentName"));
+        if (NameAlias.IsEmpty())
+        {
+            NameAlias = GetJsonStringField(Payload, TEXT("name"));
+        }
+        if (!NameAlias.IsEmpty())
+        {
+            Payload->SetStringField(TEXT("slotName"), NameAlias);
+        }
+    }
+
     TSharedPtr<FJsonObject> ResultJson = McpHandlerUtils::CreateResultObject();
     using namespace WidgetAuthoringHandlers;
     static constexpr FWidgetAuthoringActionHandler Handlers[] = {
