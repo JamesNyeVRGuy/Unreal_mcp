@@ -3,6 +3,7 @@
 // P24 Gate 2: enhanced call_function + new map_entry handlers need the
 // reflection helpers for JSON <-> property memory.
 #include "Foundation/Reflection/McpPropertyReflection.h"
+#include "Safety/McpSafeOperations.h"
 #include "UObject/UnrealType.h"
 
 bool UMcpAutomationBridgeSubsystem::HandleControlActorSetBlueprintVariables(
@@ -307,9 +308,24 @@ bool UMcpAutomationBridgeSubsystem::HandleControlActorCallFunction(
 
   TargetObject->ProcessEvent(Function, ParmsBuffer);
 
+  // Optional targeted save: BlueprintCallable mutators (AddNode/AddConnection
+  // on graph assets, etc.) dirty the package but never write it, and
+  // control_editor save_all deterministically wedges the game thread on some
+  // project states (TacticalBattler forge box, 7k+ uncontrolled assets). Save
+  // the ONE affected package via the reliable SavePackagesForObjects path.
+  bool bSaveRequested = false;
+  Payload->TryGetBoolField(TEXT("save"), bSaveRequested);
+  bool bSaved = false;
+  if (bSaveRequested) {
+    bSaved = McpSafeOperations::McpSafeAssetSave(TargetObject);
+  }
+
   TSharedPtr<FJsonObject> Data = McpHandlerUtils::CreateResultObject();
   Data->SetStringField(TEXT("objectPath"),   TargetObject->GetPathName());
   Data->SetStringField(TEXT("functionName"), Function->GetName());
+  if (bSaveRequested) {
+    Data->SetBoolField(TEXT("saved"), bSaved);
+  }
   if (!ActorName.IsEmpty()) {
     Data->SetStringField(TEXT("actorName"), ActorName);
   }
