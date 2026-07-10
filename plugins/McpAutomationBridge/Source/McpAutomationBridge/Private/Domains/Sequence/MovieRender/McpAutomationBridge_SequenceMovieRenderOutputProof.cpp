@@ -1,4 +1,5 @@
 #include "Core/Compatibility/McpVersionCompatibility.h"
+#include "Misc/EngineVersionComparison.h"
 
 #if MCP_HAS_MOVIE_RENDER_PIPELINE
 
@@ -139,9 +140,10 @@ bool CaptureRenderOutputSnapshot(UMoviePipelineExecutorJob *Job,
             ResolveConfig(Job, Message, Code)) {
       if (UMoviePipelineOutputSetting *Output =
               Cast<UMoviePipelineOutputSetting>(Config->FindSettingByClass(
-                  UMoviePipelineOutputSetting::StaticClass(), true)))
+                  UMoviePipelineOutputSetting::StaticClass(), true))) {
         State->ExpectedFileNameFormat = Output->FileNameFormat;
         State->ExpectedOutputDirectory = GetOutputDirectory(Job);
+      }
     }
   }
   TArray<FString> Files;
@@ -164,7 +166,11 @@ void CaptureRenderOutputData(const FMoviePipelineOutputData &OutputData,
     for (const TPair<FMoviePipelinePassIdentifier,
                      FMoviePipelineRenderPassOutputData> &Pass :
          Shot.RenderPassData) {
+#if UE_VERSION_OLDER_THAN(5, 6, 0)
       State->ReportedRenderPasses.Add(Pass.Key.Name.ToString());
+#else
+      State->ReportedRenderPasses.Add(Pass.Key.Name); // FMoviePipelinePassIdentifier::Name is FString in 5.6
+#endif
       for (const FString &File : Pass.Value.FilePaths)
         State->ReportedOutputFiles.Add(File);
     }

@@ -1,4 +1,5 @@
 #include "Core/Compatibility/McpVersionCompatibility.h"
+#include "Misc/EngineVersionComparison.h"
 
 #if MCP_HAS_MOVIE_RENDER_PIPELINE
 
@@ -79,7 +80,9 @@ bool UpsertMaterialPass(UMoviePipelineDeferredPassBase *Deferred,
 #if MCP_HAS_MOVIE_PIPELINE_PASS_METADATA
       Pass.Name = Name;
       Pass.bHighPrecisionOutput = bHighPrecision;
-      Pass.bUseLosslessCompression = true;
+#if UE_VERSION_OLDER_THAN(5, 6, 0)
+      Pass.bUseLosslessCompression = true; // removed from FMoviePipelinePostProcessPass in 5.6
+#endif
 #else
       (void)Name;
       (void)bHighPrecision;
@@ -96,7 +99,9 @@ bool UpsertMaterialPass(UMoviePipelineDeferredPassBase *Deferred,
   Pass.Material = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(MaterialPath));
 #if MCP_HAS_MOVIE_PIPELINE_PASS_METADATA
   Pass.bHighPrecisionOutput = bHighPrecision;
-  Pass.bUseLosslessCompression = true;
+#if UE_VERSION_OLDER_THAN(5, 6, 0)
+  Pass.bUseLosslessCompression = true; // removed from FMoviePipelinePostProcessPass in 5.6
+#endif
 #else
   (void)Name;
   (void)bHighPrecision;

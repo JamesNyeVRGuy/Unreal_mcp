@@ -1,4 +1,5 @@
 #include "MCP/Transport/McpNativeTransportPrivate.h"
+#include "Misc/EngineVersionComparison.h"
 
 void FMcpNativeTransport::HandleConnection(FSocket* ClientSocket)
 {
@@ -220,10 +221,16 @@ void FMcpNativeTransport::HandleConnection(FSocket* ClientSocket)
 		{
 			TSharedRef<FInternetAddr> RemoteAddr =
 				ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM)->CreateInternetAddr();
+#if UE_VERSION_OLDER_THAN(5, 6, 0)
 			if (ClientSocket->GetAddress(*RemoteAddr))
 			{
 				ConnectionRemoteAddr = RemoteAddr->ToString(true);
 			}
+#else
+			// UE 5.6: FSocket::GetAddress returns void (fills the addr in place).
+			ClientSocket->GetAddress(*RemoteAddr);
+			ConnectionRemoteAddr = RemoteAddr->ToString(true);
+#endif
 		}
 		FString ResponseBody = HandleInitialize(
 			Rpc.Params, Rpc.Id, NewSessionId, ConnectionRemoteAddr);
