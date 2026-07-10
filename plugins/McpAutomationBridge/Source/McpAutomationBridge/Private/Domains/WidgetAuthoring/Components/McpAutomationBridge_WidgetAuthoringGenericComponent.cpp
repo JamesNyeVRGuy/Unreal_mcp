@@ -106,8 +106,35 @@ bool HandleWidgetAuthoringGenericComponent(
         // Map component type to UWidget class
         UClass* WidgetClass = nullptr;
 
-        // Common widget types
-        if (ComponentType.Equals(TEXT("TextBlock"), ESearchCase::IgnoreCase) ||
+        // Explicit path / custom class: a WBP generated-class path (…_C), a
+        // /Script/… path, or a bare WBP asset path. Resolve directly so custom
+        // Widget Blueprints can be added as children; built-in UMG names fall
+        // through to the name chain below.
+        if (ComponentType.Contains(TEXT("/")) || ComponentType.Contains(TEXT(".")))
+        {
+            WidgetClass = LoadClass<UObject>(nullptr, *ComponentType);
+            if (!WidgetClass)
+            {
+                // Bare WBP asset path (no _C): use the generated class.
+                if (UWidgetBlueprint* ChildWidgetBP = LoadObject<UWidgetBlueprint>(nullptr, *ComponentType))
+                {
+                    WidgetClass = ChildWidgetBP->GeneratedClass;
+                }
+            }
+            if (!WidgetClass)
+            {
+                WidgetClass = FindObject<UClass>(nullptr, *ComponentType);
+            }
+        }
+
+        // Common widget types (built-in UMG names). Skipped when already resolved
+        // from an explicit path above -- otherwise the trailing else would clobber
+        // WidgetClass with a failed FindObject.
+        if (WidgetClass)
+        {
+            // already resolved from an explicit path
+        }
+        else if (ComponentType.Equals(TEXT("TextBlock"), ESearchCase::IgnoreCase) ||
             ComponentType.Equals(TEXT("Text"), ESearchCase::IgnoreCase))
         {
             WidgetClass = UTextBlock::StaticClass();
