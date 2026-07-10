@@ -175,13 +175,11 @@
     },
     {
       "Name": "MovieRenderPipeline",
-      "Enabled": true,
-      "Optional": true
+      "Enabled": true
     },
     {
       "Name": "MoviePipelineMaskRenderPass",
-      "Enabled": true,
-      "Optional": true
+      "Enabled": true
     },
     {
       "Name": "Takes",
