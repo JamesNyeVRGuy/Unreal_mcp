@@ -2,6 +2,7 @@
 #include "Domains/WidgetAuthoring/Support/McpAutomationBridge_WidgetAuthoringBlueprintLoading.h"
 
 #include "Blueprint/WidgetTree.h"
+#include "Components/BorderSlot.h"
 #include "Components/CanvasPanelSlot.h"
 #include "Components/HorizontalBoxSlot.h"
 #include "Components/OverlaySlot.h"
@@ -359,6 +360,13 @@ bool HandleWidgetAuthoringManipulation(
             if (auto H = ParseHAlign(HAlignStr)) { OvSlot->SetHorizontalAlignment(H.GetValue()); bApplied = true; }
             if (auto V = ParseVAlign(VAlignStr)) { OvSlot->SetVerticalAlignment(V.GetValue());   bApplied = true; }
             if (bHasPadding) { OvSlot->SetPadding(PaddingMargin); bApplied = true; }
+        }
+        else if (UBorderSlot* BorderSlot = Cast<UBorderSlot>(Widget->Slot))
+        {
+            SlotType = TEXT("BorderSlot");
+            if (auto H = ParseHAlign(HAlignStr)) { BorderSlot->SetHorizontalAlignment(H.GetValue()); bApplied = true; }
+            if (auto V = ParseVAlign(VAlignStr)) { BorderSlot->SetVerticalAlignment(V.GetValue());   bApplied = true; }
+            if (bHasPadding) { BorderSlot->SetPadding(PaddingMargin); bApplied = true; }
         }
         else if (Cast<UCanvasPanelSlot>(Widget->Slot))
         {

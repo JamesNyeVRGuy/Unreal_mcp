@@ -3,6 +3,7 @@
 #include "Domains/WidgetAuthoring/McpAutomationBridge_WidgetAuthoringPayload.h"
 
 #include "Blueprint/WidgetTree.h"
+#include "Components/BorderSlot.h"
 #include "Components/CanvasPanelSlot.h"
 #include "Components/HorizontalBoxSlot.h"
 #include "Components/OverlaySlot.h"
@@ -88,6 +89,19 @@ bool HandleWidgetAuthoringSlotAppearance(
                 Padding.Right = GetJsonNumberField(PaddingObj, TEXT("right"), 0.0);
                 Padding.Bottom = GetJsonNumberField(PaddingObj, TEXT("bottom"), 0.0);
                 OverlaySlotWidget->SetPadding(Padding);
+            }
+        }
+        else if (UBorderSlot* BorderSlotWidget = Cast<UBorderSlot>(Widget->Slot))
+        {
+            TSharedPtr<FJsonObject> PaddingObj = GetObjectField(Payload, TEXT("padding"));
+            if (PaddingObj.IsValid())
+            {
+                FMargin Padding;
+                Padding.Left = GetJsonNumberField(PaddingObj, TEXT("left"), 0.0);
+                Padding.Top = GetJsonNumberField(PaddingObj, TEXT("top"), 0.0);
+                Padding.Right = GetJsonNumberField(PaddingObj, TEXT("right"), 0.0);
+                Padding.Bottom = GetJsonNumberField(PaddingObj, TEXT("bottom"), 0.0);
+                BorderSlotWidget->SetPadding(Padding);
             }
         }
 
