@@ -218,21 +218,34 @@ bool HandleWidgetAuthoringCanvasSlotGeometry(
         }
 
         UCanvasPanelSlot* CanvasSlot = Cast<UCanvasPanelSlot>(Widget->Slot);
-        if (CanvasSlot)
+        if (!CanvasSlot)
         {
-            TSharedPtr<FJsonObject> PositionObj = GetObjectField(Payload, TEXT("position"));
-            if (PositionObj.IsValid())
-            {
-                FVector2D Position;
-                Position.X = GetJsonNumberField(PositionObj, TEXT("x"), 0.0);
-                Position.Y = GetJsonNumberField(PositionObj, TEXT("y"), 0.0);
-                CanvasSlot->SetPosition(Position);
-            }
+            // TACB-928: fail loudly instead of silently succeeding on a non-canvas slot.
+            Subsystem.SendAutomationError(RequestingSocket, RequestId, TEXT("Widget is not in a CanvasPanel; set_position needs a canvas child"), TEXT("WRONG_SLOT_TYPE"));
+            return true;
         }
+
+        // TACB-928: the tool schema exposes TOP-LEVEL x/y; the handler previously only read a
+        // nested { position: {x,y} } object, so top-level x/y silently no-opped. Accept both.
+        FVector2D Position;
+        TSharedPtr<FJsonObject> PositionObj = GetObjectField(Payload, TEXT("position"));
+        if (PositionObj.IsValid())
+        {
+            Position.X = GetJsonNumberField(PositionObj, TEXT("x"), 0.0);
+            Position.Y = GetJsonNumberField(PositionObj, TEXT("y"), 0.0);
+        }
+        else
+        {
+            Position.X = GetJsonNumberField(Payload, TEXT("x"), 0.0);
+            Position.Y = GetJsonNumberField(Payload, TEXT("y"), 0.0);
+        }
+        CanvasSlot->SetPosition(Position);
 
         FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WidgetBP);
 
         ResultJson->SetBoolField(TEXT("success"), true);
+        ResultJson->SetNumberField(TEXT("x"), Position.X);
+        ResultJson->SetNumberField(TEXT("y"), Position.Y);
         ResultJson->SetStringField(TEXT("message"), TEXT("Position set"));
 
         Subsystem.SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Position set"), ResultJson);
@@ -264,21 +277,34 @@ bool HandleWidgetAuthoringCanvasSlotGeometry(
         }
 
         UCanvasPanelSlot* CanvasSlot = Cast<UCanvasPanelSlot>(Widget->Slot);
-        if (CanvasSlot)
+        if (!CanvasSlot)
         {
-            TSharedPtr<FJsonObject> SizeObj = GetObjectField(Payload, TEXT("size"));
-            if (SizeObj.IsValid())
-            {
-                FVector2D Size;
-                Size.X = GetJsonNumberField(SizeObj, TEXT("x"), 100.0);
-                Size.Y = GetJsonNumberField(SizeObj, TEXT("y"), 100.0);
-                CanvasSlot->SetSize(Size);
-            }
+            Subsystem.SendAutomationError(RequestingSocket, RequestId, TEXT("Widget is not in a CanvasPanel; set_size needs a canvas child"), TEXT("WRONG_SLOT_TYPE"));
+            return true;
         }
+
+        // TACB-928: accept top-level width/height (tool schema) as well as a nested
+        // { size: {x/width, y/height} } object; previously only the nested object was read,
+        // so top-level width/height silently no-opped.
+        FVector2D Size;
+        TSharedPtr<FJsonObject> SizeObj = GetObjectField(Payload, TEXT("size"));
+        if (SizeObj.IsValid())
+        {
+            Size.X = GetJsonNumberField(SizeObj, TEXT("x"), GetJsonNumberField(SizeObj, TEXT("width"), 100.0));
+            Size.Y = GetJsonNumberField(SizeObj, TEXT("y"), GetJsonNumberField(SizeObj, TEXT("height"), 100.0));
+        }
+        else
+        {
+            Size.X = GetJsonNumberField(Payload, TEXT("width"), 100.0);
+            Size.Y = GetJsonNumberField(Payload, TEXT("height"), 100.0);
+        }
+        CanvasSlot->SetSize(Size);
 
         FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WidgetBP);
 
         ResultJson->SetBoolField(TEXT("success"), true);
+        ResultJson->SetNumberField(TEXT("width"), Size.X);
+        ResultJson->SetNumberField(TEXT("height"), Size.Y);
         ResultJson->SetStringField(TEXT("message"), TEXT("Size set"));
 
         Subsystem.SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Size set"), ResultJson);
