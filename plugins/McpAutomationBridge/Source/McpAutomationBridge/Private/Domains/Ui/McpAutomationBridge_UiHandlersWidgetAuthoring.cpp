@@ -5,6 +5,7 @@
 #include "AssetToolsModule.h"
 #include "Blueprint/UserWidget.h"
 #include "Blueprint/WidgetTree.h"
+#include "Domains/WidgetAuthoring/Support/McpAutomationBridge_WidgetAuthoringGuidRegistry.h"
 #include "Components/PanelWidget.h"
 #include "EditorAssetLibrary.h"
 #include "Foundation/BridgeHelpers/McpAutomationBridgeHelpers.h"
@@ -163,9 +164,19 @@ bool HandleWidgetAuthoringAction(
   FString ParentName;
   Payload->TryGetStringField(TEXT("parentName"), ParentName);
 
+  // TACB-928: honor an explicit child name so the child can satisfy a C++ BindWidget /
+  // BindWidgetOptional property (which matches child widgets by name). Without it the widget
+  // gets an auto-generated name and never binds -- the whole point of add_widget_child for
+  // custom UserWidgets (e.g. a UWidget_ProgressBar named "CraftProgressBar").
+  FString ChildName;
+  Payload->TryGetStringField(TEXT("name"), ChildName);
+
   WidgetBP->Modify();
-  UWidget *NewWidget = WidgetBP->WidgetTree->ConstructWidget<UWidget>(
-      WidgetClass);
+  UWidget *NewWidget =
+      ChildName.IsEmpty()
+          ? WidgetBP->WidgetTree->ConstructWidget<UWidget>(WidgetClass)
+          : WidgetBP->WidgetTree->ConstructWidget<UWidget>(WidgetClass, FName(*ChildName));
+  WidgetAuthoringHelpers::RegisterWidgetGuid(WidgetBP, NewWidget);
 
   bool bAdded = false;
   if (ParentName.IsEmpty()) {
