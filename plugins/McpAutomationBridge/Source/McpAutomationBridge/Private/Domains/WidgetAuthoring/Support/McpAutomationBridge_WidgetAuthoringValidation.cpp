@@ -49,17 +49,25 @@ bool ValidateWidgetCreation(UWidgetBlueprint* WidgetBP, const FString& WidgetNam
     UWidget* FoundWidget = WidgetBP->WidgetTree->FindWidget(FName(*WidgetName));
     if (!FoundWidget)
     {
-        OutError = FString::Printf(TEXT("Widget '%s' was not found in widget tree after creation"), *WidgetName);
+        // Creation genuinely failed -- surface any captured engine error as context.
+        if (CheckForEngineErrors())
+        {
+            TArray<FString> Errors = GetCapturedErrors();
+            OutError = Errors.Num() > 0
+                ? FString::Printf(TEXT("Widget '%s' not created: %s"), *WidgetName, *Errors[0])
+                : FString::Printf(TEXT("Widget '%s' was not found in widget tree after creation"), *WidgetName);
+        }
+        else
+        {
+            OutError = FString::Printf(TEXT("Widget '%s' was not found in widget tree after creation"), *WidgetName);
+        }
         return false;
     }
-    if (CheckForEngineErrors())
-    {
-        TArray<FString> Errors = GetCapturedErrors();
-        OutError = Errors.Num() > 0
-            ? FString::Printf(TEXT("Engine error during widget creation: %s"), *Errors[0])
-            : TEXT("Engine error occurred during widget creation");
-        return false;
-    }
+    // TACB-928: the widget is present in the tree -> the add SUCCEEDED. A globally-captured
+    // non-fatal "Handled ensure" (from anywhere in the session) must NOT fail a demonstrably
+    // successful creation -- doing so made every add_* report ENGINE_ERROR despite working.
+    // Presence in the tree is the authoritative success signal; captured errors are only
+    // consulted above when the widget is genuinely absent.
     return true;
 }
 

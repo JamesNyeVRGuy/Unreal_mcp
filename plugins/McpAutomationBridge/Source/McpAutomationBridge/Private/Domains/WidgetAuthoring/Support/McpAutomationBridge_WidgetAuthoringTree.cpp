@@ -1,5 +1,6 @@
 #include "Domains/WidgetAuthoring/Support/McpAutomationBridge_WidgetAuthoringTreeMutation.h"
 
+#include "Components/ContentWidget.h"
 #include "Components/PanelWidget.h"
 #include "Components/Widget.h"
 #include "Core/Compatibility/McpVersionCompatibility.h"
@@ -67,6 +68,17 @@ bool SafeAddWidgetToTree(UWidgetBlueprint* WidgetBP, UWidget* NewWidget, const F
     if (!ParentPanel)
     {
         UE_LOG(LogTemp, Warning, TEXT("SafeAddWidgetToTree: Parent '%s' is not a panel widget"), *ParentSlot);
+        return false;
+    }
+    // TACB-928: a UContentWidget (Button/Border/SizeBox/etc.) holds exactly ONE child. Adding a
+    // second silently orphans it (and its later descendants fail to register), which reads as a
+    // confusing "not found after creation" downstream. Fail loudly with guidance instead.
+    if (Cast<UContentWidget>(ParentPanel) && ParentPanel->GetChildrenCount() > 0)
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("SafeAddWidgetToTree: Parent '%s' is a single-child container that already has a child; "
+                 "add into that child, or wrap the contents in a panel (HBox/VBox/Overlay)."),
+            *ParentSlot);
         return false;
     }
     ParentPanel->AddChild(NewWidget);
