@@ -7,6 +7,12 @@
 #include "Components/TextBlock.h"
 #include "Components/Border.h"
 #include "Components/Image.h"
+#include "Components/Button.h"
+#include "Components/SizeBox.h"
+#include "Components/ProgressBar.h"
+#include "Components/Slider.h"
+#include "Components/CheckBox.h"
+#include "Components/EditableTextBox.h"
 #include "Engine/Texture2D.h"
 #include "Materials/MaterialInterface.h"
 #include "Styling/SlateBrush.h"
@@ -176,6 +182,30 @@ bool HandleWidgetAuthoringStyleClipping(
                     AsText->SetShadowOffset(Vec2Param(TEXT("shadowOffset"), FVector2D::ZeroVector));
                     Applied.Add(TEXT("shadowOffset"));
                 }
+                // TACB-947: typography extensions (tracking, typeface, outline, skew, font asset)
+                // applied as a single font edit so hierarchy can be built precisely.
+                {
+                    FSlateFontInfo Font = AsText->GetFont();
+                    bool bFontChanged = false;
+                    if (Payload->HasField(TEXT("letterSpacing"))) { Font.LetterSpacing = FMath::RoundToInt(Payload->GetNumberField(TEXT("letterSpacing"))); bFontChanged = true; Applied.Add(TEXT("letterSpacing")); }
+                    if (Payload->HasField(TEXT("fontTypeface")))  { Font.TypefaceFontName = FName(*GetJsonStringField(Payload, TEXT("fontTypeface"))); bFontChanged = true; Applied.Add(TEXT("fontTypeface")); }
+                    if (Payload->HasField(TEXT("skewAmount")))    { Font.SkewAmount = Payload->GetNumberField(TEXT("skewAmount")); bFontChanged = true; Applied.Add(TEXT("skewAmount")); }
+                    if (Payload->HasField(TEXT("outlineSize")))   { Font.OutlineSettings.OutlineSize = FMath::RoundToInt(Payload->GetNumberField(TEXT("outlineSize"))); bFontChanged = true; Applied.Add(TEXT("outlineSize")); }
+                    if (Payload->HasField(TEXT("outlineColor")))  { Font.OutlineSettings.OutlineColor = ColorParam(TEXT("outlineColor")); bFontChanged = true; Applied.Add(TEXT("outlineColor")); }
+                    if (Payload->HasField(TEXT("fontObjectPath")))
+                    {
+                        if (UObject* FontObj = LoadObject<UObject>(nullptr, *GetJsonStringField(Payload, TEXT("fontObjectPath"))))
+                        {
+                            Font.FontObject = FontObj; bFontChanged = true; Applied.Add(TEXT("fontObject"));
+                        }
+                    }
+                    if (bFontChanged) { AsText->SetFont(Font); }
+                }
+                if (Payload->HasField(TEXT("minDesiredWidth")))
+                {
+                    AsText->SetMinDesiredWidth(Payload->GetNumberField(TEXT("minDesiredWidth")));
+                    Applied.Add(TEXT("minDesiredWidth"));
+                }
             }
             else if (UBorder* AsBorder = Cast<UBorder>(Widget))
             {
@@ -281,6 +311,119 @@ bool HandleWidgetAuthoringStyleClipping(
                 {
                     AsImage->SetBrush(Brush);
                     Applied.Add(TEXT("brush"));
+                }
+            }
+            else if (UButton* AsButton = Cast<UButton>(Widget))
+            {
+                // TACB-947: buttons are styled through FButtonStyle per-state brushes (the generic
+                // reflection setter can't reach them). brushColor tints all interactive states at
+                // once; per-state overrides + cornerRadius/outline/padding refine it.
+                FButtonStyle BtnStyle = AsButton->GetStyle();
+                bool bBtnChanged = false;
+                TArray<FSlateBrush*> States = { &BtnStyle.Normal, &BtnStyle.Hovered, &BtnStyle.Pressed, &BtnStyle.Disabled };
+                if (Payload->HasField(TEXT("brushColor")))
+                {
+                    const FSlateColor C(ColorParam(TEXT("brushColor")));
+                    BtnStyle.Normal.TintColor = BtnStyle.Hovered.TintColor = BtnStyle.Pressed.TintColor = C;
+                    bBtnChanged = true;
+                }
+                if (Payload->HasField(TEXT("normalColor")))   { BtnStyle.Normal.TintColor   = FSlateColor(ColorParam(TEXT("normalColor")));   bBtnChanged = true; }
+                if (Payload->HasField(TEXT("hoveredColor")))  { BtnStyle.Hovered.TintColor  = FSlateColor(ColorParam(TEXT("hoveredColor")));  bBtnChanged = true; }
+                if (Payload->HasField(TEXT("pressedColor")))  { BtnStyle.Pressed.TintColor  = FSlateColor(ColorParam(TEXT("pressedColor")));  bBtnChanged = true; }
+                if (Payload->HasField(TEXT("disabledColor"))) { BtnStyle.Disabled.TintColor = FSlateColor(ColorParam(TEXT("disabledColor"))); bBtnChanged = true; }
+                if (Payload->HasField(TEXT("cornerRadius")))
+                {
+                    const double R = Payload->GetNumberField(TEXT("cornerRadius"));
+                    for (FSlateBrush* B : States) { B->DrawAs = ESlateBrushDrawType::RoundedBox; B->OutlineSettings.CornerRadii = FVector4(R, R, R, R); B->OutlineSettings.RoundingType = ESlateBrushRoundingType::FixedRadius; }
+                    bBtnChanged = true;
+                }
+                if (Payload->HasField(TEXT("outlineColor")) || Payload->HasField(TEXT("outlineWidth")))
+                {
+                    for (FSlateBrush* B : States)
+                    {
+                        if (Payload->HasField(TEXT("outlineColor"))) { B->OutlineSettings.Color = FSlateColor(ColorParam(TEXT("outlineColor"))); }
+                        if (Payload->HasField(TEXT("outlineWidth"))) { B->OutlineSettings.Width = Payload->GetNumberField(TEXT("outlineWidth")); }
+                    }
+                    bBtnChanged = true;
+                }
+                if (Payload->HasField(TEXT("padding")))
+                {
+                    const TSharedPtr<FJsonObject>* PadObj = nullptr;
+                    if (Payload->TryGetObjectField(TEXT("padding"), PadObj) && PadObj)
+                    {
+                        const FMargin Pad(
+                            (*PadObj)->HasField(TEXT("left"))   ? (*PadObj)->GetNumberField(TEXT("left"))   : 0.0,
+                            (*PadObj)->HasField(TEXT("top"))    ? (*PadObj)->GetNumberField(TEXT("top"))    : 0.0,
+                            (*PadObj)->HasField(TEXT("right"))  ? (*PadObj)->GetNumberField(TEXT("right"))  : 0.0,
+                            (*PadObj)->HasField(TEXT("bottom")) ? (*PadObj)->GetNumberField(TEXT("bottom")) : 0.0);
+                        BtnStyle.NormalPadding = Pad; BtnStyle.PressedPadding = Pad; bBtnChanged = true;
+                    }
+                }
+                if (bBtnChanged) { AsButton->SetStyle(BtnStyle); Applied.Add(TEXT("buttonStyle")); }
+                if (Payload->HasField(TEXT("backgroundColor"))) { AsButton->SetBackgroundColor(ColorParam(TEXT("backgroundColor"))); Applied.Add(TEXT("backgroundColor")); }
+            }
+            else if (USizeBox* AsSizeBox = Cast<USizeBox>(Widget))
+            {
+                // TACB-947: the primary "size a panel deterministically" tool. Setters flip the bOverride flags.
+                if (Payload->HasField(TEXT("widthOverride")))    { AsSizeBox->SetWidthOverride(Payload->GetNumberField(TEXT("widthOverride")));       Applied.Add(TEXT("widthOverride")); }
+                if (Payload->HasField(TEXT("heightOverride")))   { AsSizeBox->SetHeightOverride(Payload->GetNumberField(TEXT("heightOverride")));     Applied.Add(TEXT("heightOverride")); }
+                if (Payload->HasField(TEXT("minDesiredWidth")))  { AsSizeBox->SetMinDesiredWidth(Payload->GetNumberField(TEXT("minDesiredWidth")));   Applied.Add(TEXT("minDesiredWidth")); }
+                if (Payload->HasField(TEXT("minDesiredHeight"))) { AsSizeBox->SetMinDesiredHeight(Payload->GetNumberField(TEXT("minDesiredHeight"))); Applied.Add(TEXT("minDesiredHeight")); }
+                if (Payload->HasField(TEXT("maxDesiredWidth")))  { AsSizeBox->SetMaxDesiredWidth(Payload->GetNumberField(TEXT("maxDesiredWidth")));   Applied.Add(TEXT("maxDesiredWidth")); }
+                if (Payload->HasField(TEXT("maxDesiredHeight"))) { AsSizeBox->SetMaxDesiredHeight(Payload->GetNumberField(TEXT("maxDesiredHeight"))); Applied.Add(TEXT("maxDesiredHeight")); }
+            }
+            else if (UProgressBar* AsBar = Cast<UProgressBar>(Widget))
+            {
+                // TACB-947: fill + track color for health/cooldown/craft bars.
+                if (Payload->HasField(TEXT("fillColor")) || Payload->HasField(TEXT("fillColorAndOpacity")))
+                {
+                    const TCHAR* Key = Payload->HasField(TEXT("fillColor")) ? TEXT("fillColor") : TEXT("fillColorAndOpacity");
+                    AsBar->SetFillColorAndOpacity(ColorParam(Key)); Applied.Add(TEXT("fillColor"));
+                }
+                FProgressBarStyle BarStyle = AsBar->GetWidgetStyle();
+                bool bBarChanged = false;
+                if (Payload->HasField(TEXT("backgroundColor"))) { BarStyle.BackgroundImage.TintColor = FSlateColor(ColorParam(TEXT("backgroundColor"))); bBarChanged = true; }
+                if (Payload->HasField(TEXT("fillImageColor")))  { BarStyle.FillImage.TintColor = FSlateColor(ColorParam(TEXT("fillImageColor"))); bBarChanged = true; }
+                if (bBarChanged) { AsBar->SetWidgetStyle(BarStyle); Applied.Add(TEXT("barStyle")); }
+                if (Payload->HasField(TEXT("isMarquee"))) { AsBar->SetIsMarquee(Payload->GetBoolField(TEXT("isMarquee"))); Applied.Add(TEXT("isMarquee")); }
+                if (Payload->HasField(TEXT("percent")))   { AsBar->SetPercent(Payload->GetNumberField(TEXT("percent"))); Applied.Add(TEXT("percent")); }
+            }
+            else if (USlider* AsSlider = Cast<USlider>(Widget))
+            {
+                if (Payload->HasField(TEXT("barColor")))    { AsSlider->SetSliderBarColor(ColorParam(TEXT("barColor")));       Applied.Add(TEXT("barColor")); }
+                if (Payload->HasField(TEXT("handleColor"))) { AsSlider->SetSliderHandleColor(ColorParam(TEXT("handleColor"))); Applied.Add(TEXT("handleColor")); }
+            }
+            else if (UCheckBox* AsCheck = Cast<UCheckBox>(Widget))
+            {
+                FCheckBoxStyle CkStyle = AsCheck->GetWidgetStyle();
+                bool bCkChanged = false;
+                if (Payload->HasField(TEXT("checkedColor")))
+                {
+                    const FSlateColor C(ColorParam(TEXT("checkedColor")));
+                    CkStyle.CheckedImage.TintColor = C; CkStyle.CheckedHoveredImage.TintColor = C; CkStyle.CheckedPressedImage.TintColor = C; bCkChanged = true;
+                }
+                if (Payload->HasField(TEXT("uncheckedColor")))
+                {
+                    const FSlateColor C(ColorParam(TEXT("uncheckedColor")));
+                    CkStyle.UncheckedImage.TintColor = C; CkStyle.UncheckedHoveredImage.TintColor = C; CkStyle.UncheckedPressedImage.TintColor = C; bCkChanged = true;
+                }
+                if (bCkChanged) { AsCheck->SetWidgetStyle(CkStyle); Applied.Add(TEXT("checkboxStyle")); }
+            }
+            else if (UEditableTextBox* AsInput = Cast<UEditableTextBox>(Widget))
+            {
+                if (Payload->HasField(TEXT("foregroundColor")) || Payload->HasField(TEXT("colorAndOpacity")))
+                {
+                    const TCHAR* Key = Payload->HasField(TEXT("foregroundColor")) ? TEXT("foregroundColor") : TEXT("colorAndOpacity");
+                    AsInput->SetForegroundColor(ColorParam(Key)); Applied.Add(TEXT("foregroundColor"));
+                }
+                if (Payload->HasField(TEXT("hintText"))) { AsInput->SetHintText(FText::FromString(GetJsonStringField(Payload, TEXT("hintText")))); Applied.Add(TEXT("hintText")); }
+                if (Payload->HasField(TEXT("justification")))
+                {
+                    const FString J = GetJsonStringField(Payload, TEXT("justification"));
+                    ETextJustify::Type JT = ETextJustify::Left;
+                    if (J.Equals(TEXT("Center"), ESearchCase::IgnoreCase)) JT = ETextJustify::Center;
+                    else if (J.Equals(TEXT("Right"), ESearchCase::IgnoreCase)) JT = ETextJustify::Right;
+                    AsInput->SetJustification(JT); Applied.Add(TEXT("justification"));
                 }
             }
 

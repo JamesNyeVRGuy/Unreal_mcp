@@ -14,6 +14,26 @@ All notable changes to the MCP Automation Bridge plugin will be documented in th
 - Added continuous local output-path validation, disabled network-backed media URLs because redirect destinations cannot be pinned, added client-scoped native rate limits, enforced strict native `manage_tools` argument validation, and sanitized streamed log payloads.
 
 ### Added
+- **`set_style` now covers the full common widget set + typography (TACB-947)** — previously only
+  TextBlock/Border/Image were styleable; a `UButton` fell through to a generic `Style` property that
+  doesn't exist (`PROPERTY_NOT_FOUND`), and there was no way to size a `USizeBox` or color a
+  `UProgressBar`. Added typed branches:
+  - **Button** — `brushColor` (tints Normal/Hovered/Pressed), per-state `normalColor`/`hoveredColor`/
+    `pressedColor`/`disabledColor`, `cornerRadius`, `outlineColor`/`outlineWidth`, `padding`, plus
+    `backgroundColor` (SetBackgroundColor).
+  - **SizeBox** — `widthOverride`/`heightOverride` (the deterministic panel-sizing tool; setters flip
+    the bOverride flags) + `minDesiredWidth/Height`, `maxDesiredWidth/Height`.
+  - **ProgressBar** — `fillColor`, `backgroundColor`/`fillImageColor` (via FProgressBarStyle),
+    `isMarquee`, `percent`.
+  - **Slider** — `barColor`, `handleColor`.
+  - **CheckBox** — `checkedColor`, `uncheckedColor` (per-state brush tints).
+  - **EditableTextBox** — `foregroundColor`, `hintText`, `justification`.
+  - **TextBlock typography extensions** — `letterSpacing` (tracking), `fontTypeface`, `skewAmount`,
+    `outlineSize`/`outlineColor`, `fontObjectPath`, `minDesiredWidth`.
+- **`set_slot` now handles Grid / UniformGrid / WrapBox / ScrollBox slots (TACB-947)** — was
+  HBox/VBox/Overlay/Border only. `GridSlot`: `row`/`column`/`rowSpan`/`columnSpan`/`layer` + align +
+  padding (inventory/crafting grids). `UniformGridSlot`: `row`/`column` + align. `WrapBoxSlot`:
+  align + padding + `fillEmptySpace`/`fillSpanWhenLessThan`. `ScrollBoxSlot`: align + padding.
 - **`manage_blueprint set_child_index` reorders a box/overlay/grid child (TACB-928)** — the `add_*` actions only ever append, so a section header added after a populated column landed at the bottom with no way to move it up; the UI-audit restyle loop could not place top-of-column headers. `set_child_index` (params: `widgetPath`, `slotName`, `index`) calls `UPanelWidget::ShiftChild`, reordering in place and preserving the existing slot (unlike Remove+InsertChildAt). Index is clamped to the child range.
 - **`remove_widget` / `rename_widget` / `reparent_widget` / `get_widget_slot_info` are now reachable via `manage_blueprint` (TACB-928)** — the handlers already existed in the C++ Manipulation dispatcher but were gated out of the `WIDGET_AUTHORING_ACTIONS` schema enum, so callers got a client-side validation reject. Added to the action enum + per-action required-field map. This is the delete/reparent recovery path the widget-authoring loop was missing.
 - **`system_control add_widget_child` now accepts an explicit `name`** — the child was constructed with an auto-generated name, so it could never satisfy a C++ `BindWidget`/`BindWidgetOptional` property (which matches child widgets by name) -- defeating the action's main purpose (dropping a custom `UserWidget`/WBP, e.g. a `UWidget_ProgressBar` named `CraftProgressBar`, or a panel named to bind into a HUD). Pass `name` to control the child's FName; the widget's GUID is now registered too. Omitting `name` keeps the old auto-named behavior.

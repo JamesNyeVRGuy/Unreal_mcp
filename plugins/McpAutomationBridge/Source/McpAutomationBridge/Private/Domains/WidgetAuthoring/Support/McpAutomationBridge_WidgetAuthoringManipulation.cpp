@@ -5,8 +5,12 @@
 #include "Blueprint/WidgetTree.h"
 #include "Components/BorderSlot.h"
 #include "Components/CanvasPanelSlot.h"
+#include "Components/GridSlot.h"
 #include "Components/HorizontalBoxSlot.h"
 #include "Components/OverlaySlot.h"
+#include "Components/ScrollBoxSlot.h"
+#include "Components/UniformGridSlot.h"
+#include "Components/WrapBoxSlot.h"
 #include "Components/PanelSlot.h"
 #include "Components/PanelWidget.h"
 #include "Components/VerticalBoxSlot.h"
@@ -372,6 +376,43 @@ bool HandleWidgetAuthoringManipulation(
             if (auto H = ParseHAlign(HAlignStr)) { BorderSlot->SetHorizontalAlignment(H.GetValue()); bApplied = true; }
             if (auto V = ParseVAlign(VAlignStr)) { BorderSlot->SetVerticalAlignment(V.GetValue());   bApplied = true; }
             if (bHasPadding) { BorderSlot->SetPadding(PaddingMargin); bApplied = true; }
+        }
+        else if (UGridSlot* GridSlot = Cast<UGridSlot>(Widget->Slot))
+        {
+            // TACB-947: place a child in a Grid Panel (inventory/crafting grids) by row/column + span.
+            SlotType = TEXT("GridSlot");
+            if (Payload->HasField(TEXT("row")))        { GridSlot->SetRow(static_cast<int32>(GetJsonNumberField(Payload, TEXT("row"), 0)));               bApplied = true; }
+            if (Payload->HasField(TEXT("column")))     { GridSlot->SetColumn(static_cast<int32>(GetJsonNumberField(Payload, TEXT("column"), 0)));         bApplied = true; }
+            if (Payload->HasField(TEXT("rowSpan")))    { GridSlot->SetRowSpan(static_cast<int32>(GetJsonNumberField(Payload, TEXT("rowSpan"), 1)));       bApplied = true; }
+            if (Payload->HasField(TEXT("columnSpan"))) { GridSlot->SetColumnSpan(static_cast<int32>(GetJsonNumberField(Payload, TEXT("columnSpan"), 1))); bApplied = true; }
+            if (Payload->HasField(TEXT("layer")))      { GridSlot->SetLayer(static_cast<int32>(GetJsonNumberField(Payload, TEXT("layer"), 0)));           bApplied = true; }
+            if (auto H = ParseHAlign(HAlignStr)) { GridSlot->SetHorizontalAlignment(H.GetValue()); bApplied = true; }
+            if (auto V = ParseVAlign(VAlignStr)) { GridSlot->SetVerticalAlignment(V.GetValue());   bApplied = true; }
+            if (bHasPadding) { GridSlot->SetPadding(PaddingMargin); bApplied = true; }
+        }
+        else if (UUniformGridSlot* UniSlot = Cast<UUniformGridSlot>(Widget->Slot))
+        {
+            SlotType = TEXT("UniformGridSlot");
+            if (Payload->HasField(TEXT("row")))    { UniSlot->SetRow(static_cast<int32>(GetJsonNumberField(Payload, TEXT("row"), 0)));       bApplied = true; }
+            if (Payload->HasField(TEXT("column"))) { UniSlot->SetColumn(static_cast<int32>(GetJsonNumberField(Payload, TEXT("column"), 0))); bApplied = true; }
+            if (auto H = ParseHAlign(HAlignStr)) { UniSlot->SetHorizontalAlignment(H.GetValue()); bApplied = true; }
+            if (auto V = ParseVAlign(VAlignStr)) { UniSlot->SetVerticalAlignment(V.GetValue());   bApplied = true; }
+        }
+        else if (UWrapBoxSlot* WrapSlot = Cast<UWrapBoxSlot>(Widget->Slot))
+        {
+            SlotType = TEXT("WrapBoxSlot");
+            if (auto H = ParseHAlign(HAlignStr)) { WrapSlot->SetHorizontalAlignment(H.GetValue()); bApplied = true; }
+            if (auto V = ParseVAlign(VAlignStr)) { WrapSlot->SetVerticalAlignment(V.GetValue());   bApplied = true; }
+            if (bHasPadding) { WrapSlot->SetPadding(PaddingMargin); bApplied = true; }
+            if (Payload->HasField(TEXT("fillEmptySpace")))       { WrapSlot->SetFillEmptySpace(Payload->GetBoolField(TEXT("fillEmptySpace")));                 bApplied = true; }
+            if (Payload->HasField(TEXT("fillSpanWhenLessThan"))) { WrapSlot->SetFillSpanWhenLessThan(GetJsonNumberField(Payload, TEXT("fillSpanWhenLessThan"), 0.0)); bApplied = true; }
+        }
+        else if (UScrollBoxSlot* ScrollSlot = Cast<UScrollBoxSlot>(Widget->Slot))
+        {
+            SlotType = TEXT("ScrollBoxSlot");
+            if (auto H = ParseHAlign(HAlignStr)) { ScrollSlot->SetHorizontalAlignment(H.GetValue()); bApplied = true; }
+            if (auto V = ParseVAlign(VAlignStr)) { ScrollSlot->SetVerticalAlignment(V.GetValue());   bApplied = true; }
+            if (bHasPadding) { ScrollSlot->SetPadding(PaddingMargin); bApplied = true; }
         }
         else if (Cast<UCanvasPanelSlot>(Widget->Slot))
         {
