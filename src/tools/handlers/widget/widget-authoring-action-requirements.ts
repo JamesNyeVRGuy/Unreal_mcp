@@ -76,6 +76,12 @@ const WIDGET_ACTION_REQUIREMENTS: Readonly<Record<string, readonly string[]>> = 
   add_animation_track: ['widgetPath', 'animationName', 'slotName', 'trackType'],
   add_animation_keyframe: ['widgetPath', 'animationName'],
   set_animation_loop: ['widgetPath', 'animationName'],
+  // TACB-928: widget manipulation actions (handled in the C++ Manipulation handler).
+  remove_widget: ['widgetPath', 'slotName'],
+  rename_widget: ['widgetPath', 'slotName', 'newName'],
+  reparent_widget: ['widgetPath', 'slotName', 'newParent'],
+  get_widget_slot_info: ['widgetPath', 'slotName'],
+  set_child_index: ['widgetPath', 'slotName', 'index'],
   ...Object.fromEntries(WIDGET_PATH_ONLY_ACTIONS.map((action) => [action, ['widgetPath']])),
   ...Object.fromEntries(WIDGET_SLOT_ACTIONS.map((action) => [action, ['widgetPath', 'slotName']])),
   ...Object.fromEntries(NAME_ONLY_TEMPLATE_ACTIONS.map((action) => [action, ['name']]))

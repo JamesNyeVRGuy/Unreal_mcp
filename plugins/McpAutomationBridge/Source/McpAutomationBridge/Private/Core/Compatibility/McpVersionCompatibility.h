@@ -350,9 +350,13 @@
 // UE 5.1: WidgetVariableNameToGuidMap exists
 // UE 5.2: WidgetVariableNameToGuidMap does NOT exist (or is private)
 // UE 5.3: WidgetVariableNameToGuidMap does NOT exist (not present in engine)
-// UE 5.4-5.6: WidgetVariableNameToGuidMap does NOT exist in public headers
+// UE 5.4-5.5: WidgetVariableNameToGuidMap does NOT exist in public headers
+// UE 5.6: WidgetVariableNameToGuidMap IS public in UMGEditor/Public/WidgetBlueprint.h (verified
+//         WidgetBlueprint.h:239, UPROPERTY under `public:`). TACB-929: the old gate excluded 5.6,
+//         so RegisterWidgetGuid compiled to a no-op and every widget tripped the engine's
+//         WidgetVariableNameToGuidMap.Contains ensure (~34 per add). Enabling 5.6 populates the map.
 // UE 5.7+: WidgetVariableNameToGuidMap exists again in UMGEditor/Public/WidgetBlueprint.h
-#if ENGINE_MAJOR_VERSION == 5 && (ENGINE_MINOR_VERSION == 1 || ENGINE_MINOR_VERSION >= 7)
+#if ENGINE_MAJOR_VERSION == 5 && (ENGINE_MINOR_VERSION == 1 || ENGINE_MINOR_VERSION >= 6)
     #define MCP_HAS_WIDGET_VARIABLE_GUID_MAP 1
     #define MCP_WIDGET_BP_GET_GUID_MAP(WidgetBP) (WidgetBP)->WidgetVariableNameToGuidMap
 #else

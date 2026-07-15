@@ -395,6 +395,66 @@ bool HandleWidgetAuthoringManipulation(
         return true;
     }
 
+    // set_child_index -- TACB-928: reorder an existing child within its box/overlay/grid parent.
+    // The add_* actions only ever append, so a header added after a populated column lands at the
+    // bottom; without a reorder the audit loop cannot put section headers at the top. ShiftChild
+    // reorders in place and preserves the existing slot (unlike Remove+InsertChildAt).
+    if (SubAction.Equals(TEXT("set_child_index"), ESearchCase::IgnoreCase))
+    {
+        const FString WidgetPath = GetJsonStringField(Payload, TEXT("widgetPath"));
+        FString SlotName = GetJsonStringField(Payload, TEXT("slotName"));
+        if (SlotName.IsEmpty())
+        {
+            SlotName = GetJsonStringField(Payload, TEXT("widgetName"));
+        }
+        if (WidgetPath.IsEmpty() || SlotName.IsEmpty() || !Payload->HasField(TEXT("index")))
+        {
+            Subsystem.SendAutomationError(RequestingSocket, RequestId,
+                TEXT("Missing required parameters: widgetPath, slotName, index"),
+                TEXT("MISSING_PARAMETER"));
+            return true;
+        }
+        const int32 TargetIndex = static_cast<int32>(GetJsonNumberField(Payload, TEXT("index"), 0.0));
+
+        UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(WidgetPath);
+        if (!WidgetBP || !WidgetBP->WidgetTree)
+        {
+            Subsystem.SendAutomationError(RequestingSocket, RequestId,
+                TEXT("Widget blueprint not found"), TEXT("NOT_FOUND"));
+            return true;
+        }
+        UWidget* TargetWidget = WidgetBP->WidgetTree->FindWidget(FName(*SlotName));
+        if (!TargetWidget)
+        {
+            Subsystem.SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("Widget '%s' not found"), *SlotName), TEXT("NOT_FOUND"));
+            return true;
+        }
+        UPanelWidget* Parent = TargetWidget->GetParent();
+        if (!Parent)
+        {
+            Subsystem.SendAutomationError(RequestingSocket, RequestId,
+                FString::Printf(TEXT("Widget '%s' has no panel parent to reorder within"), *SlotName),
+                TEXT("NO_PARENT"));
+            return true;
+        }
+        const int32 ChildCount = Parent->GetChildrenCount();
+        const int32 ClampedIndex = FMath::Clamp(TargetIndex, 0, FMath::Max(0, ChildCount - 1));
+        Parent->ShiftChild(ClampedIndex, TargetWidget);
+        FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WidgetBP);
+
+        ResultJson->SetBoolField(TEXT("success"), true);
+        ResultJson->SetStringField(TEXT("widgetPath"), WidgetPath);
+        ResultJson->SetStringField(TEXT("slotName"), SlotName);
+        ResultJson->SetStringField(TEXT("parentName"), Parent->GetName());
+        ResultJson->SetNumberField(TEXT("index"), ClampedIndex);
+        ResultJson->SetStringField(TEXT("message"),
+            FString::Printf(TEXT("Moved '%s' to index %d in '%s'"), *SlotName, ClampedIndex, *Parent->GetName()));
+
+        Subsystem.SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Child reordered"), ResultJson);
+        return true;
+    }
+
     return false;
 }
 }

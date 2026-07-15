@@ -55,6 +55,11 @@ bool SafeAddWidgetToTree(UWidgetBlueprint* WidgetBP, UWidget* NewWidget, const F
             WidgetTree->RemoveWidget(WidgetTree->RootWidget);
             WidgetTree->RootWidget = NewWidget;
         }
+        // TACB-929: register the WHOLE tree, not just NewWidget. Pre-existing widgets authored by
+        // the bridge on 5.6 (when RegisterWidgetGuid was a compiled-out no-op) are still missing
+        // from WidgetVariableNameToGuidMap, so the structural-modify that follows this call would
+        // ensure over every one of them. Registering all (idempotent) clears the map before then.
+        RegisterAllWidgetGuids(WidgetBP);
         return true;
     }
 
@@ -84,6 +89,8 @@ bool SafeAddWidgetToTree(UWidgetBlueprint* WidgetBP, UWidget* NewWidget, const F
     ParentPanel->AddChild(NewWidget);
     UE_LOG(LogTemp, Verbose, TEXT("SafeAddWidgetToTree: Added '%s' as child of '%s'"),
         *NewWidget->GetName(), *ParentSlot);
+    // TACB-929: register the whole tree before the caller's structural-modify (see note above).
+    RegisterAllWidgetGuids(WidgetBP);
     return true;
 }
 

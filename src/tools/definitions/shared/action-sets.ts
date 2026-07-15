@@ -161,7 +161,10 @@ export const WIDGET_AUTHORING_ACTIONS = [
   'add_crosshair', 'add_compass', 'add_interaction_prompt', 'add_objective_tracker',
   'add_damage_indicator', 'create_inventory_ui', 'create_dialog_widget', 'create_radial_menu',
   'get_widget_info', 'preview_widget', 'screenshot_widget',
-  'set_slot', 'validate_widget_blueprint'
+  'set_slot', 'validate_widget_blueprint',
+  // TACB-928: widget manipulation (already handled in the C++ Manipulation handler, previously
+  // unreachable because the action enum gated them out). set_child_index reorders a box child.
+  'remove_widget', 'rename_widget', 'reparent_widget', 'get_widget_slot_info', 'set_child_index'
 ] as const;
 
 export const SESSION_ACTIONS = [
