@@ -69,6 +69,11 @@ bool HandleWidgetAuthoringManipulation(
         // "was deleted but still has a GUID" ensure (WidgetBlueprintCompiler.cpp:828).
         UnregisterWidgetAndChildren(WidgetBP, TargetWidget);
         WidgetBP->WidgetTree->RemoveWidget(TargetWidget);
+        // TACB-929: reconcile the widget-variable GUID map to the live tree before the
+        // compile-triggering structural-modify -- prunes stale entries left by a prior
+        // rename/remove and registers any newly added/renamed widget, silencing the
+        // WidgetVariableNameToGuidMap ensure (WidgetBlueprintCompiler.cpp:794/828).
+        RegisterAllWidgetGuids(WidgetBP);
         FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WidgetBP);
 
         ResultJson->SetBoolField(TEXT("success"), true);
@@ -107,6 +112,11 @@ bool HandleWidgetAuthoringManipulation(
 
         // Rename requires FBlueprintEditorUtils for proper undo/redo support
         TargetWidget->Rename(*NewName);
+        // TACB-929: reconcile the widget-variable GUID map to the live tree before the
+        // compile-triggering structural-modify -- prunes stale entries left by a prior
+        // rename/remove and registers any newly added/renamed widget, silencing the
+        // WidgetVariableNameToGuidMap ensure (WidgetBlueprintCompiler.cpp:794/828).
+        RegisterAllWidgetGuids(WidgetBP);
         FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WidgetBP);
 
         ResultJson->SetBoolField(TEXT("success"), true);
@@ -158,6 +168,11 @@ bool HandleWidgetAuthoringManipulation(
         }
         NewParentWidget->AddChild(TargetWidget);
 
+        // TACB-929: reconcile the widget-variable GUID map to the live tree before the
+        // compile-triggering structural-modify -- prunes stale entries left by a prior
+        // rename/remove and registers any newly added/renamed widget, silencing the
+        // WidgetVariableNameToGuidMap ensure (WidgetBlueprintCompiler.cpp:794/828).
+        RegisterAllWidgetGuids(WidgetBP);
         FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WidgetBP);
 
         ResultJson->SetBoolField(TEXT("success"), true);
@@ -430,6 +445,11 @@ bool HandleWidgetAuthoringManipulation(
             return true;
         }
 
+        // TACB-929: reconcile the widget-variable GUID map to the live tree before the
+        // compile-triggering structural-modify -- prunes stale entries left by a prior
+        // rename/remove and registers any newly added/renamed widget, silencing the
+        // WidgetVariableNameToGuidMap ensure (WidgetBlueprintCompiler.cpp:794/828).
+        RegisterAllWidgetGuids(WidgetBP);
         FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WidgetBP);
 
         ResultJson->SetBoolField(TEXT("success"),   true);
@@ -487,6 +507,11 @@ bool HandleWidgetAuthoringManipulation(
         const int32 ChildCount = Parent->GetChildrenCount();
         const int32 ClampedIndex = FMath::Clamp(TargetIndex, 0, FMath::Max(0, ChildCount - 1));
         Parent->ShiftChild(ClampedIndex, TargetWidget);
+        // TACB-929: reconcile the widget-variable GUID map to the live tree before the
+        // compile-triggering structural-modify -- prunes stale entries left by a prior
+        // rename/remove and registers any newly added/renamed widget, silencing the
+        // WidgetVariableNameToGuidMap ensure (WidgetBlueprintCompiler.cpp:794/828).
+        RegisterAllWidgetGuids(WidgetBP);
         FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WidgetBP);
 
         ResultJson->SetBoolField(TEXT("success"), true);

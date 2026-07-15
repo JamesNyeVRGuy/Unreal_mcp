@@ -6,6 +6,7 @@
 #include "Blueprint/UserWidget.h"
 #include "Blueprint/WidgetTree.h"
 #include "Domains/WidgetAuthoring/Support/McpAutomationBridge_WidgetAuthoringGuidRegistry.h"
+#include "Kismet2/BlueprintEditorUtils.h"
 #include "Components/PanelWidget.h"
 #include "EditorAssetLibrary.h"
 #include "Foundation/BridgeHelpers/McpAutomationBridgeHelpers.h"
@@ -207,6 +208,12 @@ bool HandleWidgetAuthoringAction(
 
   if (bAdded) {
     bSuccess = true;
+    // TACB-929: now the child is in the tree, reconcile the GUID map (registers it,
+    // prunes any pre-existing stale entries) and structurally recompile so the child
+    // becomes a real widget variable a C++ BindWidget[Optional] can bind to -- without
+    // the structural-modify the added child never generates its variable.
+    WidgetAuthoringHelpers::RegisterAllWidgetGuids(WidgetBP);
+    FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WidgetBP);
     Message = FString::Printf(TEXT("Added %s to %s"),
                               *WidgetClass->GetName(), *WidgetBP->GetName());
     Resp->SetStringField(TEXT("widgetName"), NewWidget->GetName());
