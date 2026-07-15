@@ -79,6 +79,7 @@ void RegisterAllWidgetGuids(UWidgetBlueprint* WidgetBP)
     {
         return;
     }
+    // Add a GUID for every current widget/animation that lacks one.
     WidgetBP->WidgetTree->ForEachWidget([WidgetBP](UWidget* Widget) {
         if (Widget)
         {
@@ -92,5 +93,26 @@ void RegisterAllWidgetGuids(UWidgetBlueprint* WidgetBP)
             RegisterAnimationGuid(WidgetBP, Animation);
         }
     }
+#if MCP_HAS_WIDGET_VARIABLE_GUID_MAP
+    // TACB-929: prune STALE entries -- names still in the map whose widget/animation was removed
+    // (remove_widget/rename_widget don't unregister). The engine's compiler self-heals these
+    // (WidgetBlueprintCompiler.cpp:828 ensureAlways -> RemoveCurrent), but the ensure is noisy, so
+    // reconcile the map to the live tree here (this runs before the add path's structural-modify).
+    TSet<FName> LiveNames;
+    WidgetBP->WidgetTree->ForEachWidget([&LiveNames](UWidget* Widget) {
+        if (Widget) { LiveNames.Add(Widget->GetFName()); }
+    });
+    for (const UWidgetAnimation* Animation : WidgetBP->Animations)
+    {
+        if (Animation) { LiveNames.Add(Animation->GetFName()); }
+    }
+    for (auto It = WidgetBP->WidgetVariableNameToGuidMap.CreateIterator(); It; ++It)
+    {
+        if (!LiveNames.Contains(It.Key()))
+        {
+            It.RemoveCurrent();
+        }
+    }
+#endif
 }
 }

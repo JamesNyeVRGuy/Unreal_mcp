@@ -1,5 +1,6 @@
 #include "Domains/WidgetAuthoring/McpAutomationBridge_WidgetAuthoringActions.h"
 #include "Domains/WidgetAuthoring/Support/McpAutomationBridge_WidgetAuthoringBlueprintLoading.h"
+#include "Domains/WidgetAuthoring/Support/McpAutomationBridge_WidgetAuthoringTreeMutation.h"
 
 #include "Blueprint/WidgetTree.h"
 #include "Components/BorderSlot.h"
@@ -59,6 +60,10 @@ bool HandleWidgetAuthoringManipulation(
             return true;
         }
 
+        // TACB-929: drop the widget's (and its children's) GUID-map entries before removing it,
+        // else a stale name lingers in WidgetVariableNameToGuidMap and trips the compiler's
+        // "was deleted but still has a GUID" ensure (WidgetBlueprintCompiler.cpp:828).
+        UnregisterWidgetAndChildren(WidgetBP, TargetWidget);
         WidgetBP->WidgetTree->RemoveWidget(TargetWidget);
         FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WidgetBP);
 
