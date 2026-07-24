@@ -3,6 +3,7 @@
 #if WITH_EDITOR
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "EnvironmentQuery/EnvQuery.h"
+#include "EnvironmentQuery/EnvQueryContext.h"
 #include "EnvironmentQuery/EnvQueryOption.h"
 #include "EnvironmentQuery/Generators/EnvQueryGenerator_ActorsOfClass.h"
 #include "EnvironmentQuery/Generators/EnvQueryGenerator_OnCircle.h"
@@ -12,6 +13,24 @@
 
 namespace McpAIHandlers
 {
+// Resolve an EQS context class from a full object path (/Script/Module.Class) or a bare class name.
+static UClass* ResolveEQSGeneratorContext(const FString& NameOrPath)
+{
+    if (NameOrPath.IsEmpty())
+    {
+        return nullptr;
+    }
+    UClass* Found = FindObject<UClass>(nullptr, *NameOrPath);
+    if (!Found)
+    {
+        Found = FindObject<UClass>(nullptr, *FString::Printf(TEXT("/Script/AIModule.%s"), *NameOrPath));
+    }
+    if (!Found)
+    {
+        Found = LoadObject<UClass>(nullptr, *NameOrPath);
+    }
+    return (Found && Found->IsChildOf(UEnvQueryContext::StaticClass())) ? Found : nullptr;
+}
 static UEnvQuery* CreateEQSQueryAsset(const FString& Path, const FString& Name, FString& OutError)
 {
     // Sanitize and validate path first
@@ -181,6 +200,14 @@ bool HandleAddEQSGenerator(UMcpAutomationBridgeSubsystem* Self, const FString& R
                     {
                         GridGenerator->SpaceBetween.DefaultValue = static_cast<float>(NumberValue);
                     }
+                    FString SearchCenter;
+                    if ((*GeneratorSettings)->TryGetStringField(TEXT("searchCenter"), SearchCenter))
+                    {
+                        if (UClass* CenterContext = ResolveEQSGeneratorContext(SearchCenter))
+                        {
+                            GridGenerator->GenerateAround = CenterContext;
+                        }
+                    }
                 }
                 else if (UEnvQueryGenerator_OnCircle* CircleGenerator = Cast<UEnvQueryGenerator_OnCircle>(NewGenerator))
                 {
@@ -192,6 +219,14 @@ bool HandleAddEQSGenerator(UMcpAutomationBridgeSubsystem* Self, const FString& R
                     if ((*GeneratorSettings)->TryGetNumberField(TEXT("spacesBetween"), NumberValue))
                     {
                         CircleGenerator->SpaceBetween.DefaultValue = static_cast<float>(NumberValue);
+                    }
+                    FString SearchCenter;
+                    if ((*GeneratorSettings)->TryGetStringField(TEXT("searchCenter"), SearchCenter))
+                    {
+                        if (UClass* CenterContext = ResolveEQSGeneratorContext(SearchCenter))
+                        {
+                            CircleGenerator->CircleCenter = CenterContext;
+                        }
                     }
                 }
             }

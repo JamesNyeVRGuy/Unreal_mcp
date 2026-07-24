@@ -2,12 +2,11 @@
 
 #if WITH_EDITOR
 #include "EnvironmentQuery/EnvQuery.h"
+#include "EnvironmentQuery/EnvQueryContext.h"
 #include "EnvironmentQuery/EnvQueryOption.h"
 #include "EnvironmentQuery/EnvQueryTest.h"
 
 #if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
-#include "EnvironmentQuery/Tests/EnvQueryTest_Distance.h"
-#include "EnvironmentQuery/Tests/EnvQueryTest_Trace.h"
 #define MCP_HAS_ENVQUERY_TESTS 1
 #else
 #define MCP_HAS_ENVQUERY_TESTS 0
@@ -15,6 +14,24 @@
 
 namespace McpAIHandlers
 {
+// Resolve an EQS context class from a full object path (/Script/Module.Class) or a bare class name.
+static UClass* ResolveEQSContextClass(const FString& NameOrPath)
+{
+    if (NameOrPath.IsEmpty())
+    {
+        return nullptr;
+    }
+    UClass* Found = FindObject<UClass>(nullptr, *NameOrPath);
+    if (!Found)
+    {
+        Found = FindObject<UClass>(nullptr, *FString::Printf(TEXT("/Script/AIModule.%s"), *NameOrPath));
+    }
+    if (!Found)
+    {
+        Found = LoadObject<UClass>(nullptr, *NameOrPath);
+    }
+    return (Found && Found->IsChildOf(UEnvQueryContext::StaticClass())) ? Found : nullptr;
+}
 bool HandleAddEQSContext(UMcpAutomationBridgeSubsystem* Self, const FString& RequestId, const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> RequestingSocket)
 {
     const FString SubAction = TEXT("add_eqs_context");
@@ -71,23 +88,19 @@ bool HandleAddEQSTest(UMcpAutomationBridgeSubsystem* Self, const FString& Reques
 
         UEnvQueryTest* NewTest = nullptr;
 #if MCP_HAS_ENVQUERY_TESTS
-        // Use runtime class lookup to avoid GetPrivateStaticClass requirement
-        // StaticClass() calls GetPrivateStaticClass() internally which isn't exported
-        UClass* TestClass = nullptr;
-        if (TestType.Equals(TEXT("Distance"), ESearchCase::IgnoreCase))
+        // Generic runtime class lookup: covers every UEnvQueryTest_* in AIModule (Distance, Trace, Pathfinding,
+        // Overlap, Dot, GameplayTags, Project, Random, ...) plus a full-path fallback for custom test classes.
+        // Runtime lookup avoids StaticClass()/GetPrivateStaticClass, which isn't exported across modules.
+        UClass* TestClass = FindObject<UClass>(nullptr, *FString::Printf(TEXT("/Script/AIModule.EnvQueryTest_%s"), *TestType));
+        if (!TestClass)
         {
-            TestClass = FindObject<UClass>(nullptr, TEXT("/Script/AIModule.EnvQueryTest_Distance"));
-        }
-        else if (TestType.Equals(TEXT("Trace"), ESearchCase::IgnoreCase))
-        {
-            TestClass = FindObject<UClass>(nullptr, TEXT("/Script/AIModule.EnvQueryTest_Trace"));
+            TestClass = FindObject<UClass>(nullptr, *TestType);
         }
 
-        if (TestClass)
+        if (TestClass && TestClass->IsChildOf(UEnvQueryTest::StaticClass()))
         {
-            // Use NewObject with runtime UClass parameter to avoid template instantiation
             UObject* TestObj = NewObject<UObject>(Query, TestClass);
-            if (TestObj && TestObj->GetClass()->IsChildOf(UEnvQueryTest::StaticClass()))
+            if (TestObj)
             {
                 NewTest = static_cast<UEnvQueryTest*>(TestObj);
             }
@@ -95,6 +108,28 @@ bool HandleAddEQSTest(UMcpAutomationBridgeSubsystem* Self, const FString& Reques
 #endif
         if (NewTest)
         {
+            // Optional: aim the test at a specific EQS context (e.g. trace-to / distance-to a last-known-position
+            // context) instead of the default querier. Set via reflection so it works for any test's context
+            // property (Distance::DistanceTo, Trace::Context, ...).
+            const FString TestContext = GetStringFieldAI(Payload, TEXT("testContext"));
+            if (!TestContext.IsEmpty())
+            {
+                bool bContextSet = false;
+                if (UClass* ContextClass = ResolveEQSContextClass(TestContext))
+                {
+                    for (TFieldIterator<FClassProperty> PropIt(NewTest->GetClass()); PropIt; ++PropIt)
+                    {
+                        FClassProperty* ClassProp = *PropIt;
+                        if (ClassProp->MetaClass && ClassProp->MetaClass->IsChildOf(UEnvQueryContext::StaticClass()))
+                        {
+                            ClassProp->SetObjectPropertyValue(ClassProp->ContainerPtrToValuePtr<void>(NewTest), ContextClass);
+                            bContextSet = true;
+                            break;
+                        }
+                    }
+                }
+                Result->SetBoolField(TEXT("contextSet"), bContextSet);
+            }
             auto& Options = Query->GetOptionsMutable();
             if (Options.Num() == 0 || !Options[0])
             {

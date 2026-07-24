@@ -114,6 +114,7 @@ testSettings: {
           description: 'Test scoring and filter settings.'
         },
 testIndex: { type: 'number', description: 'Index of test to configure.' },
+testContext: { type: 'string', description: 'EQS context the test scores against (e.g. trace-to / distance-to). Full object path (/Script/Module.Class) or bare class name. Applies to add_eqs_test.' },
 sightConfig: {
           type: 'object',
           properties: {
