@@ -522,5 +522,122 @@ bool HandleConfigureStateTreeTask(UMcpAutomationBridgeSubsystem* Self, const FSt
 
     return true;
 }
+
+// Remove task node(s) from a StateTree state's EditorData, then recompile + save.
+// Selector: nodeClass (task struct path OR short name) and/or nodeId (GUID). At least one is
+// required so a state's task list is never blanked by accident. Complements configure_state_tree_task
+// (add-only): together they enable the duplicate-a-StateTree-then-swap-the-task workflow -- add the new
+// task, remove the leftover source task -- producing a clean single-task tree without editor-UI authoring.
+bool HandleRemoveStateTreeTask(UMcpAutomationBridgeSubsystem* Self, const FString& RequestId, const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> RequestingSocket)
+{
+    TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
+#if MCP_HAS_STATE_TREE && MCP_STATE_TREE_HEADERS_AVAILABLE
+    const FString StateTreePath = GetStringFieldAI(Payload, TEXT("stateTreePath"));
+    const FString StateName = GetStringFieldAI(Payload, TEXT("stateName"));
+    if (StateTreePath.IsEmpty() || StateName.IsEmpty())
+    {
+        Self->SendAutomationError(RequestingSocket, RequestId, TEXT("stateTreePath and stateName are required"), TEXT("INVALID_PARAMS"));
+        return true;
+    }
+
+    UStateTree* StateTree = LoadObject<UStateTree>(nullptr, *StateTreePath);
+    if (!StateTree)
+    {
+        Self->SendAutomationError(RequestingSocket, RequestId, FString::Printf(TEXT("StateTree not found: %s"), *StateTreePath), TEXT("NOT_FOUND"));
+        return true;
+    }
+    UStateTreeEditorData* EditorData = Cast<UStateTreeEditorData>(StateTree->EditorData);
+    if (!EditorData)
+    {
+        Self->SendAutomationError(RequestingSocket, RequestId, TEXT("StateTree has no EditorData"), TEXT("INVALID_STATE"));
+        return true;
+    }
+
+    // Find the state (recursive over subtrees) -- same traversal as configure_state_tree_task.
+    UStateTreeState* FoundState = nullptr;
+    TFunction<UStateTreeState*(UStateTreeState*, const FString&)> FindState;
+    FindState = [&FindState](UStateTreeState* State, const FString& Name) -> UStateTreeState* {
+        if (!State) return nullptr;
+        if (State->Name.ToString().Equals(Name, ESearchCase::IgnoreCase)) return State;
+        for (UStateTreeState* Child : State->Children)
+        {
+            if (UStateTreeState* Found = FindState(Child, Name)) return Found;
+        }
+        return nullptr;
+    };
+    for (UStateTreeState* SubTree : EditorData->SubTrees)
+    {
+        FoundState = FindState(SubTree, StateName);
+        if (FoundState) break;
+    }
+    if (!FoundState)
+    {
+        Self->SendAutomationError(RequestingSocket, RequestId, FString::Printf(TEXT("State '%s' not found"), *StateName), TEXT("NOT_FOUND"));
+        return true;
+    }
+
+    const FString NodeClass = GetStringFieldAI(Payload, TEXT("nodeClass"), TEXT(""));
+    const FString NodeIdStr = GetStringFieldAI(Payload, TEXT("nodeId"), TEXT(""));
+    if (NodeClass.IsEmpty() && NodeIdStr.IsEmpty())
+    {
+        Self->SendAutomationError(RequestingSocket, RequestId, TEXT("Provide nodeClass and/or nodeId to select the task(s) to remove"), TEXT("INVALID_PARAMS"));
+        return true;
+    }
+    FGuid TargetId;
+    const bool bHasId = !NodeIdStr.IsEmpty() && FGuid::Parse(NodeIdStr, TargetId);
+
+    TArray<TSharedPtr<FJsonValue>> RemovedJson;
+    for (int32 i = FoundState->Tasks.Num() - 1; i >= 0; --i)
+    {
+        const FStateTreeEditorNode& Task = FoundState->Tasks[i];
+        bool bMatch = false;
+        if (bHasId && Task.ID == TargetId)
+        {
+            bMatch = true;
+        }
+        if (!NodeClass.IsEmpty() && Task.Node.IsValid())
+        {
+            if (const UScriptStruct* NodeStruct = Task.Node.GetScriptStruct())
+            {
+                if (NodeStruct->GetPathName() == NodeClass || NodeStruct->GetName() == NodeClass)
+                {
+                    bMatch = true;
+                }
+            }
+        }
+        if (bMatch)
+        {
+            RemovedJson.Add(MakeShared<FJsonValueString>(Task.ID.ToString()));
+            FoundState->Tasks.RemoveAt(i);
+        }
+    }
+    const int32 RemovedCount = RemovedJson.Num();
+
+    // Recompile so the runtime side (Nodes, bindings, hash) reflects the removal.
+    FStateTreeCompilerLog Log;
+    const bool bCompiled = UStateTreeEditingSubsystem::CompileStateTree(StateTree, Log);
+    if (!bCompiled)
+    {
+        Log.DumpToLog(LogMcpAIHandlers);
+    }
+    McpSafeAssetSave(StateTree);
+
+    Result->SetStringField(TEXT("stateName"), StateName);
+    Result->SetNumberField(TEXT("removedCount"), RemovedCount);
+    Result->SetNumberField(TEXT("taskCount"), FoundState->Tasks.Num());
+    Result->SetBoolField(TEXT("compiled"), bCompiled);
+    Result->SetNumberField(TEXT("compiledHash"), static_cast<double>(StateTree->LastCompiledEditorDataHash));
+    Result->SetArrayField(TEXT("removedNodeIds"), RemovedJson);
+    Result->SetStringField(TEXT("message"), FString::Printf(TEXT("Removed %d task(s) from state"), RemovedCount));
+    Self->SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Task(s) removed"), Result);
+#elif MCP_HAS_STATE_TREE
+    Result->SetStringField(TEXT("message"), TEXT("Task removal registered (headers unavailable)"));
+    Result->SetBoolField(TEXT("headersUnavailable"), true);
+    Self->SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Task removal (no-op)"), Result);
+#else
+    Self->SendAutomationError(RequestingSocket, RequestId, TEXT("State Trees require UE 5.3+"), TEXT("UNSUPPORTED_VERSION"));
+#endif
+    return true;
+}
 }
 #endif

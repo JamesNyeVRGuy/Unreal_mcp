@@ -179,6 +179,11 @@ bool UMcpAutomationBridgeSubsystem::HandleManageAIAction(
         return McpAIHandlers::HandleConfigureStateTreeTask(this, RequestId, Payload, RequestingSocket);
     }
 
+    if (SubAction == TEXT("remove_state_tree_task"))
+    {
+        return McpAIHandlers::HandleRemoveStateTreeTask(this, RequestId, Payload, RequestingSocket);
+    }
+
     if (SubAction == TEXT("create_smart_object_definition"))
     {
         return McpAIHandlers::HandleCreateSmartObjectDefinition(this, RequestId, Payload, RequestingSocket);

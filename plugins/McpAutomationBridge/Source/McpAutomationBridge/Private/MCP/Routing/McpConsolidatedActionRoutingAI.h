@@ -20,6 +20,7 @@ inline const TArray<FString>& ManageAICore()
 		TEXT("configure_damage_sense_config"), TEXT("set_perception_team"),
 		TEXT("create_state_tree"), TEXT("add_state_tree_state"),
 		TEXT("add_state_tree_transition"), TEXT("configure_state_tree_task"),
+		TEXT("remove_state_tree_task"),
 		TEXT("create_smart_object_definition"),
 		TEXT("add_smart_object_slot"), TEXT("configure_slot_behavior"),
 		TEXT("add_smart_object_component"),

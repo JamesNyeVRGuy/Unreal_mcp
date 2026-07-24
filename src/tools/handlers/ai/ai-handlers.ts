@@ -230,6 +230,12 @@ export async function handleAITools(
       return sendRequest('configure_state_tree_task');
     }
 
+    case 'remove_state_tree_task': {
+      requireNonEmptyString(argsRecord.stateTreePath, 'stateTreePath', 'Missing required parameter: stateTreePath');
+      requireNonEmptyString(argsRecord.stateName, 'stateName', 'Missing required parameter: stateName');
+      return sendRequest('remove_state_tree_task');
+    }
+
     // =========================================================================
     // 16.7 Smart Objects (4 actions)
     // =========================================================================

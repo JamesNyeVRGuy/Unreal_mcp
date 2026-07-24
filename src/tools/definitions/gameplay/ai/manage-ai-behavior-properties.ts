@@ -10,7 +10,7 @@ action: {
             'create_behavior_tree', 'add_composite_node', 'add_task_node', 'add_decorator', 'add_service', 'configure_bt_node',
             'create_eqs_query', 'add_eqs_generator', 'add_eqs_context', 'add_eqs_test', 'configure_test_scoring',
             'add_ai_perception_component', 'configure_sight_config', 'configure_hearing_config', 'configure_damage_sense_config', 'set_perception_team',
-            'create_state_tree', 'add_state_tree_state', 'add_state_tree_transition', 'configure_state_tree_task',
+            'create_state_tree', 'add_state_tree_state', 'add_state_tree_transition', 'configure_state_tree_task', 'remove_state_tree_task',
             'create_smart_object_definition', 'add_smart_object_slot', 'configure_slot_behavior', 'add_smart_object_component',
             'create_mass_entity_config', 'configure_mass_entity', 'add_mass_spawner',
             'get_ai_info',

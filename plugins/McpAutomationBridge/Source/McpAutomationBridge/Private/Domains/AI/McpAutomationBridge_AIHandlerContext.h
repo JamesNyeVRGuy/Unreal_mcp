@@ -54,6 +54,7 @@ MCP_AI_HANDLER_DECL(HandleCreateStateTree);
 MCP_AI_HANDLER_DECL(HandleAddStateTreeState);
 MCP_AI_HANDLER_DECL(HandleAddStateTreeTransition);
 MCP_AI_HANDLER_DECL(HandleConfigureStateTreeTask);
+MCP_AI_HANDLER_DECL(HandleRemoveStateTreeTask);
 MCP_AI_HANDLER_DECL(HandleCreateSmartObjectDefinition);
 MCP_AI_HANDLER_DECL(HandleAddSmartObjectSlot);
 MCP_AI_HANDLER_DECL(HandleConfigureSmartObjectSlotBehavior);
