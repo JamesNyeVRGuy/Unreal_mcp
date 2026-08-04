@@ -48,8 +48,8 @@ Array mutation actions (TArray<T> on a data asset, where T may be a UStruct or p
         append: { type: 'boolean', description: 'For set_curve_keys: append to existing keys (true) or replace all (false, default).' },
         propertyName: { type: 'string', description: 'TArray UPROPERTY name on the data asset, used by array mutation actions.' },
         index: { type: 'number', description: 'Array index for insert_array_item / remove_array_item_at.' },
-        value: { description: 'Element value for append_array_item / insert_array_item. Accepts JSON object for struct elements (deserialized via FJsonObjectConverter), or primitive for simple-typed arrays.' },
-        newValue: { description: 'Replacement value for update_array_item. Same format as value.' },
+        value: { type: ['object', 'array', 'string', 'number', 'boolean'], description: 'Element value for append_array_item / insert_array_item. JSON object for struct elements (deserialized via FJsonObjectConverter); for struct elements a STRING is also accepted as either JSON text or UE export-text "(Field=...)"; primitive for simple-typed arrays. Untyped before TACB-1185: clients passed objects through as strings, which the bridge now also handles.' },
+        newValue: { type: ['object', 'array', 'string', 'number', 'boolean'], description: 'Replacement value for update_array_item. Same format as value.' },
         matchKey: { type: 'string', description: 'Dotted property path on struct elements for remove_array_item_where / update_array_item (e.g. "Key.TagName"). Omit for primitive arrays.' },
         matchValue: { type: 'string', description: 'Value to match (compared against ExportText output) for remove_array_item_where / update_array_item.' }
       },

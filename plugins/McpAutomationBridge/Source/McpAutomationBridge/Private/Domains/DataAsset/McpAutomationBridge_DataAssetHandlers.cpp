@@ -842,15 +842,19 @@ static bool ResolveArrayProperty(
 }
 
 // Write a JSON value into an array element's memory.
-// Handles structs (via FJsonObjectConverter), object / class / soft references
-// (loaded from path string), and primitives (via ImportText).
+// Handles structs (via FJsonObjectConverter for JSON objects, ImportText for
+// export-text strings), object / class / soft references (loaded from path
+// string), and primitives (via ImportText). OutError names the failing branch
+// and reason so callers can surface it instead of a blind INVALID_VALUE.
 static bool WriteJsonValueIntoArrayElement(
     FProperty* InnerProp,
     void* ElemPtr,
-    const TSharedPtr<FJsonValue>& Value)
+    const TSharedPtr<FJsonValue>& Value,
+    FString& OutError)
 {
     if (!InnerProp || !ElemPtr || !Value.IsValid())
     {
+        OutError = TEXT("null property, element, or value");
         return false;
     }
 
@@ -858,8 +862,83 @@ static bool WriteJsonValueIntoArrayElement(
     if (StructProp && Value->Type == EJson::Object)
     {
         const TSharedPtr<FJsonObject> Obj = Value->AsObject();
-        if (!Obj.IsValid()) return false;
-        return FJsonObjectConverter::JsonObjectToUStruct(Obj.ToSharedRef(), StructProp->Struct, ElemPtr, 0, 0);
+        if (!Obj.IsValid())
+        {
+            OutError = TEXT("value is not a valid JSON object");
+            return false;
+        }
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 4
+        FText FailReason;
+        if (FJsonObjectConverter::JsonObjectToUStruct(Obj.ToSharedRef(), StructProp->Struct, ElemPtr, 0, 0,
+                /*bStrictMode*/ false, &FailReason))
+        {
+            return true;
+        }
+        OutError = FString::Printf(TEXT("JsonObjectToUStruct failed for %s: %s"),
+            *StructProp->Struct->GetName(), *FailReason.ToString());
+#else
+        if (FJsonObjectConverter::JsonObjectToUStruct(Obj.ToSharedRef(), StructProp->Struct, ElemPtr, 0, 0))
+        {
+            return true;
+        }
+        OutError = FString::Printf(TEXT("JsonObjectToUStruct failed for %s"), *StructProp->Struct->GetName());
+#endif
+        return false;
+    }
+
+    // Struct + string. MCP clients routinely deliver `value` as a STRING even when
+    // the caller authored a JSON object (the tool schema historically left `value`
+    // untyped, so clients had no basis to parse it -- the root cause of
+    // TACB-930/1105/1185). Accept both encodings:
+    //   1. JSON text ("{...}") -> parse, then the same JsonObjectToUStruct path.
+    //   2. UE export-text ("(Field=...,...)") -> ImportText; this is the syntax
+    //      get_*_properties returns, so read-modify-append round-trips.
+    if (StructProp && Value->Type == EJson::String)
+    {
+        const FString Text = Value->AsString();
+
+        const FString Trimmed = Text.TrimStartAndEnd();
+        if (Trimmed.StartsWith(TEXT("{")))
+        {
+            TSharedPtr<FJsonObject> ParsedObj;
+            const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Trimmed);
+            if (FJsonSerializer::Deserialize(Reader, ParsedObj) && ParsedObj.IsValid())
+            {
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 4
+                FText FailReason;
+                if (FJsonObjectConverter::JsonObjectToUStruct(ParsedObj.ToSharedRef(), StructProp->Struct, ElemPtr, 0, 0,
+                        /*bStrictMode*/ false, &FailReason))
+                {
+                    return true;
+                }
+                OutError = FString::Printf(TEXT("JsonObjectToUStruct failed for %s (from JSON string): %s"),
+                    *StructProp->Struct->GetName(), *FailReason.ToString());
+#else
+                if (FJsonObjectConverter::JsonObjectToUStruct(ParsedObj.ToSharedRef(), StructProp->Struct, ElemPtr, 0, 0))
+                {
+                    return true;
+                }
+                OutError = FString::Printf(TEXT("JsonObjectToUStruct failed for %s (from JSON string)"),
+                    *StructProp->Struct->GetName());
+#endif
+                return false;
+            }
+            OutError = FString::Printf(TEXT("value looks like JSON but did not parse: %s"), *Trimmed.Left(200));
+            return false;
+        }
+
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
+        const TCHAR* Result = InnerProp->ImportText_Direct(*Text, ElemPtr, nullptr, PPF_None);
+#else
+        const TCHAR* Result = InnerProp->ImportText(*Text, ElemPtr, PPF_None, nullptr);
+#endif
+        if (Result != nullptr)
+        {
+            return true;
+        }
+        OutError = FString::Printf(TEXT("ImportText failed for struct %s (expected export-text '(Field=...)' or JSON object text)"),
+            *StructProp->Struct->GetName());
+        return false;
     }
 
     // TSubclassOf / UClass* inner: load the class from a path string, accepting
@@ -869,7 +948,7 @@ static bool WriteJsonValueIntoArrayElement(
     // the consumer was hitting.
     if (FClassProperty* ClassProp = CastField<FClassProperty>(InnerProp))
     {
-        if (Value->Type != EJson::String) return false;
+        if (Value->Type != EJson::String) { OutError = TEXT("class element requires a string path"); return false; }
         const FString Path = Value->AsString();
         if (Path.IsEmpty())
         {
@@ -894,8 +973,12 @@ static bool WriteJsonValueIntoArrayElement(
                 }
             }
         }
-        if (!Loaded) return false;
-        if (ClassProp->MetaClass && !Loaded->IsChildOf(ClassProp->MetaClass)) return false;
+        if (!Loaded) { OutError = FString::Printf(TEXT("could not load class '%s'"), *Path); return false; }
+        if (ClassProp->MetaClass && !Loaded->IsChildOf(ClassProp->MetaClass))
+        {
+            OutError = FString::Printf(TEXT("class '%s' is not a %s"), *Path, *ClassProp->MetaClass->GetName());
+            return false;
+        }
         ClassProp->SetObjectPropertyValue(ElemPtr, Loaded);
         return true;
     }
@@ -905,7 +988,7 @@ static bool WriteJsonValueIntoArrayElement(
     // tries both shapes before giving up.
     if (FObjectProperty* ObjProp = CastField<FObjectProperty>(InnerProp))
     {
-        if (Value->Type != EJson::String) return false;
+        if (Value->Type != EJson::String) { OutError = TEXT("object element requires a string path"); return false; }
         const FString Raw = Value->AsString();
         if (Raw.IsEmpty())
         {
@@ -929,8 +1012,12 @@ static bool WriteJsonValueIntoArrayElement(
             // Fallback: try the original (unstripped) string.
             Loaded = StaticLoadObject(UObject::StaticClass(), nullptr, *Raw);
         }
-        if (!Loaded) return false;
-        if (ObjProp->PropertyClass && !Loaded->IsA(ObjProp->PropertyClass)) return false;
+        if (!Loaded) { OutError = FString::Printf(TEXT("could not load object '%s'"), *Raw); return false; }
+        if (ObjProp->PropertyClass && !Loaded->IsA(ObjProp->PropertyClass))
+        {
+            OutError = FString::Printf(TEXT("object '%s' is not a %s"), *Raw, *ObjProp->PropertyClass->GetName());
+            return false;
+        }
         ObjProp->SetObjectPropertyValue(ElemPtr, Loaded);
         return true;
     }
@@ -938,7 +1025,7 @@ static bool WriteJsonValueIntoArrayElement(
     // FSoftClassProperty: store as soft path, don't force load.
     if (FSoftClassProperty* SoftClassProp = CastField<FSoftClassProperty>(InnerProp))
     {
-        if (Value->Type != EJson::String) return false;
+        if (Value->Type != EJson::String) { OutError = TEXT("soft class element requires a string path"); return false; }
         const FSoftObjectPath SoftPath(Value->AsString());
         *static_cast<FSoftObjectPtr*>(ElemPtr) = FSoftObjectPtr(SoftPath);
         return true;
@@ -947,7 +1034,7 @@ static bool WriteJsonValueIntoArrayElement(
     // FSoftObjectProperty: store as soft path.
     if (FSoftObjectProperty* SoftObjProp = CastField<FSoftObjectProperty>(InnerProp))
     {
-        if (Value->Type != EJson::String) return false;
+        if (Value->Type != EJson::String) { OutError = TEXT("soft object element requires a string path"); return false; }
         const FSoftObjectPath SoftPath(Value->AsString());
         *static_cast<FSoftObjectPtr*>(ElemPtr) = FSoftObjectPtr(SoftPath);
         return true;
@@ -980,7 +1067,13 @@ static bool WriteJsonValueIntoArrayElement(
 #else
     const TCHAR* Result = InnerProp->ImportText(*ValueStr, ElemPtr, PPF_None, nullptr);
 #endif
-    return Result != nullptr;
+    if (Result == nullptr)
+    {
+        OutError = FString::Printf(TEXT("ImportText failed for %s element from '%s'"),
+            *InnerProp->GetClass()->GetName(), *ValueStr.Left(200));
+        return false;
+    }
+    return true;
 }
 
 // Read a dotted property path on a struct element to its export-text representation.
@@ -1097,11 +1190,13 @@ static bool HandleAppendArrayItem(
     const int32 NewIndex = Helper.AddValue();
     void* ElemPtr = Helper.GetRawPtr(NewIndex);
 
-    if (!WriteJsonValueIntoArrayElement(ArrayProp->Inner, ElemPtr, Value))
+    FString DeserializeError;
+    if (!WriteJsonValueIntoArrayElement(ArrayProp->Inner, ElemPtr, Value, DeserializeError))
     {
         Helper.RemoveValues(NewIndex, 1);
         Subsystem->SendAutomationResponse(Socket, RequestId, false,
-            TEXT("Failed to deserialize value into array element"), nullptr, TEXT("INVALID_VALUE"));
+            FString::Printf(TEXT("Failed to deserialize value into array element: %s"), *DeserializeError),
+            nullptr, TEXT("INVALID_VALUE"));
         return true;
     }
 
@@ -1164,11 +1259,13 @@ static bool HandleInsertArrayItem(
     Helper.InsertValues(Index, 1);
     void* ElemPtr = Helper.GetRawPtr(Index);
 
-    if (!WriteJsonValueIntoArrayElement(ArrayProp->Inner, ElemPtr, Value))
+    FString DeserializeError;
+    if (!WriteJsonValueIntoArrayElement(ArrayProp->Inner, ElemPtr, Value, DeserializeError))
     {
         Helper.RemoveValues(Index, 1);
         Subsystem->SendAutomationResponse(Socket, RequestId, false,
-            TEXT("Failed to deserialize value into array element"), nullptr, TEXT("INVALID_VALUE"));
+            FString::Printf(TEXT("Failed to deserialize value into array element: %s"), *DeserializeError),
+            nullptr, TEXT("INVALID_VALUE"));
         return true;
     }
 
@@ -1352,10 +1449,12 @@ static bool HandleUpdateArrayItem(
         ArrayProp->Inner->ClearValue(ElemPtr);
     }
 
-    if (!WriteJsonValueIntoArrayElement(ArrayProp->Inner, ElemPtr, NewValue))
+    FString DeserializeError;
+    if (!WriteJsonValueIntoArrayElement(ArrayProp->Inner, ElemPtr, NewValue, DeserializeError))
     {
         Subsystem->SendAutomationResponse(Socket, RequestId, false,
-            TEXT("Failed to deserialize newValue into array element"), nullptr, TEXT("INVALID_VALUE"));
+            FString::Printf(TEXT("Failed to deserialize newValue into array element: %s"), *DeserializeError),
+            nullptr, TEXT("INVALID_VALUE"));
         return true;
     }
 
