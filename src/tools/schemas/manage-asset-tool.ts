@@ -63,7 +63,7 @@ export const manageAssetToolDefinition: ToolDefinition = {
       toNodeId: commonSchemas.targetNodeId,
       toPin: commonSchemas.targetPin,
       parameterName: commonSchemas.parameterName,
-      value: commonSchemas.value,
+      value: commonSchemas.typedValue,
       x: commonSchemas.numberProp,
       y: commonSchemas.numberProp,
       comment: commonSchemas.stringProp,
@@ -93,7 +93,7 @@ export const manageAssetToolDefinition: ToolDefinition = {
       outputPin: commonSchemas.sourcePin,
       inputPin: commonSchemas.targetPin,
       type: commonSchemas.stringProp,
-      defaultValue: commonSchemas.value,
+      defaultValue: commonSchemas.typedValue,
       expressionIndex: commonSchemas.nodeId
     },
     required: ['action']

@@ -30,12 +30,26 @@ export function extractOptionalString(params: Record<string, unknown>, key: stri
 }
 
 /**
+ * Coerce a numeric string to a number. MCP clients serialize values for
+ * untyped schema fields (e.g. the shared 'defaultValue') as strings, so
+ * "0.7" must read as 0.7 rather than silently falling back to a default.
+ */
+function coerceNumber(val: unknown): number | undefined {
+  if (typeof val === 'number') return Number.isFinite(val) ? val : undefined;
+  if (typeof val === 'string' && val.trim() !== '') {
+    const parsed = Number(val);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
+}
+
+/**
  * Extract a number from normalized args, asserting it exists.
  */
 export function extractNumber(params: Record<string, unknown>, key: string): number {
-  const val = params[key];
-  if (typeof val !== 'number') {
-    throw new Error(`Expected number for '${key}', got ${typeof val}`);
+  const val = coerceNumber(params[key]);
+  if (val === undefined) {
+    throw new Error(`Expected number for '${key}', got ${typeof params[key]}`);
   }
   return val;
 }
@@ -46,7 +60,7 @@ export function extractNumber(params: Record<string, unknown>, key: string): num
 export function extractOptionalNumber(params: Record<string, unknown>, key: string): number | undefined {
   const val = params[key];
   if (val === undefined || val === null) return undefined;
-  return typeof val === 'number' ? val : undefined;
+  return coerceNumber(val);
 }
 
 /**

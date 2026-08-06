@@ -16,7 +16,11 @@ bool HandleAddScalarParameter(UMcpAutomationBridgeSubsystem* Bridge, const FStri
                           TEXT("INVALID_ARGUMENT"));
       return true;
     }
-    Payload->TryGetNumberField(TEXT("defaultValue"), DefaultValue);
+    // Accept numeric strings too -- MCP clients stringify union-typed fields.
+    if (const TSharedPtr<FJsonValue> DefaultField = Payload->TryGetField(TEXT("defaultValue"))) {
+      if (DefaultField->Type == EJson::Number) DefaultValue = DefaultField->AsNumber();
+      else if (DefaultField->Type == EJson::String) LexTryParseString(DefaultValue, *DefaultField->AsString());
+    }
     Payload->TryGetStringField(TEXT("group"), Group);
 
     UMaterialExpressionScalarParameter *ScalarParam =

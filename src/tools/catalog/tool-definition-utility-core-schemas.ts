@@ -141,6 +141,11 @@ export const coreCommonSchemas = {
   arrayOfNumbers: { type: 'array', items: { type: 'number' } },
   arrayOfObjects: { type: 'array', items: { type: 'object' } },
   value: { description: 'Generic value (any type).' },
+  // The explicit type union matters: a typeless property makes MCP clients
+  // serialize numbers/bools as strings, which downstream numeric extraction
+  // then silently dropped (parameters created at 0). Kept separate from
+  // 'value' because native-parity-locked tools mirror the typeless form.
+  typedValue: { type: ['number', 'string', 'boolean', 'object', 'array'], description: 'Generic value (any type).' },
   parentClass: { type: 'string', description: 'Path or name of the parent class.' },
 
   save: { type: 'boolean', description: 'Save the asset(s) after the operation.' },
